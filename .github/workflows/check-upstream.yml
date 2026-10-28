@@ -1,0 +1,100 @@
+name: check-upstream
+
+# Checks the official OpenCode releases every six hours. A validated new
+# v1.x.x release is auto-merged into main as a single atomic commit that
+# touches upstream.json only, and the release workflow is dispatched.
+# See docs/plan/0001-openick-delta-repository.md, Sections 5, 7, and 8.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: check-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Detect the highest stable v1.x.x release
+        id: check
+        run: ./scripts/check-upstream.sh
+
+      - name: Report an unchanged pin
+        if: steps.check.outputs.changed == 'false'
+        run: echo "OpenCode ${{ steps.check.outputs.current_tag }} is the highest stable v1.x.x release. Nothing to do."
+
+      - name: Advance the pin in the working tree
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          TAG="${{ steps.check.outputs.latest_tag }}"
+          jq \
+            --arg tag "${TAG}" \
+            --arg version "${TAG#v}" \
+            --arg commit "${{ steps.check.outputs.latest_sha }}" \
+            --arg synced "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.tag = $tag | .version = $version | .commit = $commit | .synced_at = $synced' \
+            upstream.json > upstream.json.tmp
+          mv upstream.json.tmp upstream.json
+          cat upstream.json
+
+      - name: Materialize and validate the new upstream release
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          TAG="${{ steps.check.outputs.latest_tag }}"
+          VERSION="${TAG#v}"
+          WORK="${RUNNER_TEMP}/materialized"
+          ./scripts/materialize.sh "${WORK}"
+          cd "${WORK}/tree"
+          bun install
+          OPENCODE_VERSION="${VERSION}" bun run ./packages/opencode/script/build.ts --single
+          "${GITHUB_WORKSPACE}/scripts/verify-branding.sh" \
+            "${WORK}/tree" \
+            "${WORK}/tree/packages/opencode/dist" \
+            "${VERSION}"
+
+      - name: Open an issue for a blocked synchronization
+        if: failure() && steps.check.outputs.changed == 'true'
+        run: |
+          TITLE="Upstream sync blocked: OpenCode ${{ steps.check.outputs.latest_tag }}"
+          EXISTING="$(gh issue list --state open --search "${TITLE} in:title" --json number --jq 'length')"
+          if [ "${EXISTING}" = "0" ]; then
+            gh issue create \
+              --title "${TITLE}" \
+              --body "The scheduled upstream synchronization to OpenCode ${{ steps.check.outputs.latest_tag }} failed a validation gate. The pin remains on ${{ steps.check.outputs.current_tag }} and main was not updated. Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+
+      - name: Auto-merge the validated pin as one atomic commit
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add upstream.json
+          git commit \
+            -m "chore(upstream): sync to OpenCode ${{ steps.check.outputs.latest_tag }}" \
+            -m "Previous tag: ${{ steps.check.outputs.current_tag }}
+          New tag: ${{ steps.check.outputs.latest_tag }}
+          New commit: ${{ steps.check.outputs.latest_sha }}
+          Validation gates: apply passed, branding passed, smoke build passed, smoke run passed.
+          Role: Quality Control"
+          git push origin main
+
+      - name: Dispatch the release workflow
+        if: steps.check.outputs.changed == 'true'
+        run: gh workflow run release.yml -f tag="${{ steps.check.outputs.latest_tag }}"
