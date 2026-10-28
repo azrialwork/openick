@@ -1,0 +1,57 @@
+name: validate
+
+# Validates human-made changes to the delta or the automation: materialize
+# the pinned upstream release with the delta under test and run every gate in
+# docs/plan/0001-openick-delta-repository.md, Section 7.
+
+on:
+  pull_request:
+    paths:
+      - "patches/**"
+      - "overlay/**"
+      - "scripts/**"
+      - "upstream.json"
+      - ".github/workflows/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "patches/**"
+      - "overlay/**"
+      - "scripts/**"
+      - "upstream.json"
+      - ".github/workflows/**"
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the change
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Materialize the pinned release with the delta
+        run: ./scripts/materialize.sh "${RUNNER_TEMP}/materialized"
+
+      - name: Smoke build and smoke run
+        run: |
+          VERSION="$(jq -r '.version' upstream.json)"
+          cd "${RUNNER_TEMP}/materialized/tree"
+          bun install
+          OPENCODE_VERSION="${VERSION}" bun run ./packages/opencode/script/build.ts --single
+          "${GITHUB_WORKSPACE}/scripts/verify-branding.sh" \
+            "${RUNNER_TEMP}/materialized/tree" \
+            "${RUNNER_TEMP}/materialized/tree/packages/opencode/dist" \
+            "${VERSION}"
+        working-directory: ${{ github.workspace }}
