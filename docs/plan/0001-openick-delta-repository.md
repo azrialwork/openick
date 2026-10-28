@@ -394,7 +394,7 @@ This plan is implemented when every item is true:
       `v1.19.5` with the assets defined in Section 10.
 - [ ] `README.md` and `AGENTS.md` describe the implemented system and contain
       no statement that contradicts this plan.
-- [ ] The commit history that lands this foundation on `main` consists of
+- [x] The commit history that lands this foundation on `main` consists of
       atomic commits as defined in Section 16, with one logical change per
       commit.
 
