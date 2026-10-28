@@ -1,0 +1,113 @@
+name: release
+
+# Publishes the GitHub Release for the pinned upstream version. The release
+# tag and title are identical to the upstream tag.
+# See docs/plan/0001-openick-delta-repository.md, Section 10.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to release. Must equal the pin in upstream.json."
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Confirm the requested tag equals the pin
+        id: pin
+        run: |
+          PIN_TAG="$(jq -r '.tag' upstream.json)"
+          if [ "${PIN_TAG}" != "${{ inputs.tag }}" ]; then
+            echo "error: requested tag ${{ inputs.tag }} does not equal the pin ${PIN_TAG}" >&2
+            exit 1
+          fi
+          echo "tag=${PIN_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=$(jq -r '.version' upstream.json)" >> "${GITHUB_OUTPUT}"
+          echo "commit=$(jq -r '.commit' upstream.json)" >> "${GITHUB_OUTPUT}"
+
+      - name: Check whether the release already exists
+        id: existing
+        run: |
+          if gh release view "${{ steps.pin.outputs.tag }}" > /dev/null 2>&1; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "Release ${{ steps.pin.outputs.tag }} already exists. Nothing to do."
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Set up Bun
+        if: steps.existing.outputs.exists == 'false'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Materialize the pinned release with the delta
+        if: steps.existing.outputs.exists == 'false'
+        run: ./scripts/materialize.sh "${RUNNER_TEMP}/materialized"
+
+      - name: Build every CLI target
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          cd "${RUNNER_TEMP}/materialized/tree"
+          bun install
+          OPENCODE_VERSION="${{ steps.pin.outputs.version }}" bun run ./packages/opencode/script/build.ts
+
+      - name: Package the release assets
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          ./scripts/package-release.sh \
+            "${RUNNER_TEMP}/materialized/tree" \
+            "${RUNNER_TEMP}/materialized/delta-manifest.json" \
+            "${RUNNER_TEMP}/release-assets"
+          ls -la "${RUNNER_TEMP}/release-assets"
+
+      - name: Write the release notes
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          MANIFEST="${RUNNER_TEMP}/materialized/delta-manifest.json"
+          {
+            echo "Openick release of the official OpenCode ${{ steps.pin.outputs.tag }}."
+            echo ""
+            echo "Openick is a delta build of the official OpenCode release. The OpenCode binary and brand are unmodified; the branding guard passed on this build."
+            echo ""
+            echo "- Upstream repository: anomalyco/opencode"
+            echo "- Upstream release: https://github.com/anomalyco/opencode/releases/tag/${{ steps.pin.outputs.tag }}"
+            echo "- Upstream commit: ${{ steps.pin.outputs.commit }}"
+            echo "- Patches applied: $(jq '.patches | length' "${MANIFEST}")"
+            echo "- Overlay files applied: $(jq '.overlay | length' "${MANIFEST}")"
+            echo ""
+            echo "Full provenance for this release is recorded in delta-manifest.json, and SHA256SUMS covers every asset."
+          } > "${RUNNER_TEMP}/release-notes.md"
+          cat "${RUNNER_TEMP}/release-notes.md"
+
+      - name: Create the GitHub Release
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          gh release create "${{ steps.pin.outputs.tag }}" \
+            --target "$(git rev-parse HEAD)" \
+            --title "${{ steps.pin.outputs.tag }}" \
+            --notes-file "${RUNNER_TEMP}/release-notes.md" \
+            "${RUNNER_TEMP}/release-assets"/*
+
+      - name: Audit the published release
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          gh release view "${{ steps.pin.outputs.tag }}" --json tagName,name,assets \
+            --jq '{tag: .tagName, title: .name, assets: [.assets[].name]}'
