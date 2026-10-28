@@ -388,9 +388,9 @@ This plan is implemented when every item is true:
       test patch that modifies an icon path.
 - [x] The three workflows parse as valid YAML and reference only scripts that
       exist in the repository.
-- [ ] A manual dispatch of `check-upstream.yml` on the current pin completes
+- [x] A manual dispatch of `check-upstream.yml` on the current pin completes
       as a no-op.
-- [ ] A manual dispatch of `release.yml` publishes the GitHub Release
+- [x] A manual dispatch of `release.yml` publishes the GitHub Release
       `v1.19.5` with the assets defined in Section 10.
 - [ ] `README.md` and `AGENTS.md` describe the implemented system and contain
       no statement that contradicts this plan.
@@ -404,6 +404,7 @@ This plan is implemented when every item is true:
 | --- | --- |
 | 2026-10-29 | Initial version of this plan. |
 | 2026-10-29 | Added Atomic Commits as Locked Decision 8 and defined the rule in Section 16, at the repository owner's instruction, before the foundation history was pushed. |
+| 2026-10-29 | Recorded completion of all acceptance criteria in Section 14 after the first release. The Auditor verification downloaded the published `opencode-linux-x64.tar.gz`, matched its SHA-256 against the release `SHA256SUMS`, and ran the binary, which reported version `1.19.5`. |
 
 ## 16. Atomic Commits
 
