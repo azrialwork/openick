@@ -50,3 +50,12 @@ The stack also carries the platform pruning defined in
   platform tables to their Linux entries.
 - `0007-remaining-platform-branches.patch` deletes every remaining
   Windows and macOS branch in the bundled source trees.
+
+A further patch carries the update-feature removal defined in
+`docs/plan/0004-remove-update-upgrade.md`:
+
+- `0008-remove-update-upgrade.patch` deletes the in-binary update and
+  upgrade feature: the `opencode upgrade` command, the TUI update dialog
+  and notification, the periodic version check, the `/global/upgrade`
+  server endpoint, the installation upgrade functions, and the
+  `autoupdate` configuration surface.
