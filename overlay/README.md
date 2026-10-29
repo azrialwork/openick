@@ -18,5 +18,10 @@ This directory holds the overlay half of the Openick delta. Patches live in
 
 ## Current State
 
-The overlay is empty. Openick currently ships the pinned upstream release
-with no overlay files.
+The overlay carries one file, defined in
+`docs/plan/0002-android-arm64-build.md`:
+
+- `patches/@opentui%2Fcore@0.4.5.patch` is copied into the materialized
+  tree's own `patches/` directory, where Bun applies it to the published
+  `@opentui/core` 0.4.5 package on every install. It teaches the OpenTUI
+  native asset loader the `android-arm64` target.
