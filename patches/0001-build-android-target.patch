@@ -3,7 +3,7 @@ Upstream files: packages/opencode/script/build.ts
 Rebase note: Check the flag declarations, the targets ternary, the dependency installation block, the compile target expression, and the release tarball condition first; those are the five anchor points of this patch.
 
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
-index 60a674a..ebc3eae 100755
+index 60a674a..ef53cb0 100755
 --- a/packages/opencode/script/build.ts
 +++ b/packages/opencode/script/build.ts
 @@ -22,6 +22,7 @@ const skipInstall = process.argv.includes("--skip-install")
@@ -60,7 +60,7 @@ index 60a674a..ebc3eae 100755
  
  await $`rm -rf dist`
  
-@@ -143,6 +146,23 @@ if (!skipInstall) {
+@@ -143,6 +146,28 @@ if (!skipInstall) {
    await $`bun install --os="*" --cpu="*" --libc="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
    await $`bun install --os="*" --cpu="*" --libc="*" @ff-labs/fff-bun@${pkg.dependencies["@ff-labs/fff-bun"]}`
  }
@@ -76,15 +76,20 @@ index 60a674a..ebc3eae 100755
 +    console.error("error: OPENICK_ANDROID_ASSETS must name the staged Android native assets directory in --android mode")
 +    process.exit(1)
 +  }
-+  await $`mkdir -p node_modules/@opentui`
-+  await $`cp -r ${assetsDir}/core-android-arm64 node_modules/@opentui/core-android-arm64`
-+  const bunPtyDir = (await $`realpath node_modules/bun-pty`.text()).trim()
++  // Bun's isolated layout links @opentui/core into a store directory whose
++  // @opentui scope also holds the sibling platform packages; the fabricated
++  // Android package belongs in that same scope directory so the static
++  // import in @opentui/core resolves and embeds it.
++  const coreDir = (await $`realpath node_modules/@opentui/core`.text()).trim()
++  await $`cp -r ${assetsDir}/core-android-arm64 ${path.dirname(coreDir)}/core-android-arm64`
++  // bun-pty is a dependency of the core package, not of this package.
++  const bunPtyDir = (await $`realpath ${path.join(dir, "../core/node_modules/bun-pty")}`.text()).trim()
 +  await $`cp ${assetsDir}/librust_pty_arm64.so ${bunPtyDir}/rust-pty/target/release/librust_pty_arm64.so`
 +}
  for (const item of targets) {
    const name = [
      pkg.name,
-@@ -175,7 +195,7 @@ for (const item of targets) {
+@@ -175,7 +200,7 @@ for (const item of targets) {
        autoloadDotenv: false,
        autoloadTsconfig: true,
        autoloadPackageJson: true,
@@ -93,7 +98,7 @@ index 60a674a..ebc3eae 100755
        outfile: `dist/${name}/bin/opencode`,
        execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
        windows: {},
-@@ -241,7 +261,7 @@ for (const item of targets) {
+@@ -241,7 +266,7 @@ for (const item of targets) {
  
  if (Script.release) {
    for (const key of Object.keys(binaries)) {
