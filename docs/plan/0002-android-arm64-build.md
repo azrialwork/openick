@@ -231,10 +231,16 @@ in Section 8 is its only caller.
 1. Clone `anomalyco/opentui` at tag `v0.4.5` into the work directory and
    verify the checked-out commit is the commit the tag points to.
 2. In `packages/core/src/zig`, run
-   `zig build -Dtarget=aarch64-linux-android -Doptimize=ReleaseFast`.
+   `zig build -Dtarget=aarch64-linux-android.24 --sysroot <NDK sysroot> -Doptimize=ReleaseFast`.
    Zig 0.15.2 cross-compiles the library, including its bundled C and C++
-   components, using its own Android libc and libc++ support; no NDK is
-   involved in this build.
+   components, using its own Android libc headers and libc++ support. The
+   build script links the system libraries `dl` and `pthread`, which on
+   Bionic are stub libraries that live only in the Android NDK sysroot, so
+   the NDK sysroot is passed to the Zig build for library resolution; the
+   target string carries the Android API level, 24. (Corrected during
+   implementation: the first workflow run proved that Zig's bundled
+   Android support contains no `dl`/`pthread` stubs to link against. See
+   Section 13.)
 3. Stage the produced `libopentui.so` as an npm-shaped platform package at
    `<assets-dir>/core-android-arm64/`, mirroring the published
    `@opentui/core-linux-arm64` 0.4.5 package file for file: `package.json`
@@ -356,6 +362,7 @@ to describe the non-empty delta state.
 | Date | Amendment |
 | --- | --- |
 | 2026-10-29 | Initial version of this plan. |
+| 2026-10-29 | Corrected Section 7.1 during implementation: the Zig build of `libopentui` links the system libraries `dl` and `pthread`, whose Bionic stubs exist only in the Android NDK sysroot. The build therefore passes the NDK sysroot and API level 24 in the target string. The original text, which stated that no NDK is involved in the Zig build, was wrong; the first `build-android` run failed with `unable to find dynamic system library 'dl'`. |
 
 ## 14. Acceptance Criteria
 
