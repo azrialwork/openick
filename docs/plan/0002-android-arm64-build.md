@@ -263,12 +263,30 @@ in Section 8 is its only caller.
 
 1. Clone `sursaone/bun-pty` into the work directory and check out commit
    `41dd5b887f3f47d7c307fd93f828a75dbee97d5a`.
-2. Build the crate in `rust-pty/` with Cargo for the
+2. Vendor and patch the `termios` crate. `portable-pty` 0.8.1, the PTY
+   implementation `rust-pty` is built on, depends on `termios` 0.2.2,
+   whose OS dispatch has no Android target and fails to compile for
+   `aarch64-linux-android`. The natives script downloads the official
+   `termios` 0.2.2 crate archive from crates.io (SHA-256
+   `d5d9cf598a6d7ce700a4e6a9199da127e6819a61e64b68609683cc9a01b5683a`, the
+   checksum recorded in the crates.io index, verified before use),
+   applies `scripts/termios-android.patch`, and points Cargo at the
+   vendored copy through a `[patch.crates-io]` section appended to
+   `rust-pty/Cargo.toml`. The patch adds an Android OS module to the
+   crate: the Linux module's definitions with `NCCS` set to 19, which is
+   the size of Bionic's `termios` control-character array (the glibc
+   value is 32; the flag values and control-character indices are the
+   shared asm-generic ones). The crate version is unchanged. No other
+   dependency is patched.
+3. Build the crate in `rust-pty/` with Cargo for the
    `aarch64-linux-android` target, using the runner NDK's Clang (API level
    24) as the target linker and C compiler.
-3. Stage the produced `librust_pty.so` as
+4. Stage the produced `librust_pty.so` as
    `<assets-dir>/librust_pty_arm64.so`, the exact file name the `bun-pty`
-   loader selects on Android ARM64.
+   loader selects on Android ARM64. The produced library is an AArch64 ELF
+   whose only library dependencies are `libc.so` and `libdl.so`.
+   (Established during implementation by a local build of the exact
+   pinned sources. See Section 13.)
 
 ## 8. Workflow
 
@@ -363,6 +381,7 @@ patches/0002-register-opentui-core-android.patch
 overlay/patches/@opentui%2Fcore@0.4.5.patch    Section 6.3
 scripts/build-android-natives.sh               Section 7
 scripts/opentui-zig-android.patch              Section 7.1
+scripts/termios-android.patch                  Section 7.2
 .github/workflows/build-android.yml            Section 8
 ```
 
@@ -376,6 +395,7 @@ to describe the non-empty delta state.
 | 2026-10-29 | Initial version of this plan. |
 | 2026-10-29 | Corrected Section 7.1 during implementation: the Zig build of `libopentui` links the system libraries `dl` and `pthread`, whose Bionic stubs exist only in the Android NDK sysroot. The build therefore passes the NDK sysroot and API level 24 in the target string. The original text, which stated that no NDK is involved in the Zig build, was wrong; the first `build-android` run failed with `unable to find dynamic system library 'dl'`. |
 | 2026-10-29 | Corrected Section 7.1 again during implementation, superseding the `--sysroot` formulation of the previous amendment: `--sysroot` does not make Zig search the sysroot for explicitly linked system libraries, Zig 0.15.2 cannot provide a libc for the Android target at all, and the NDK ships no `libpthread` stub (Bionic carries pthread in libc). The final mechanism, proven by a local build of the pinned sources producing an AArch64 `libopentui.so` depending only on `libdl.so`, `libm.so`, and `libc.so`, is: a small `build.zig` patch for the Android ABI (`scripts/opentui-zig-android.patch`), a generated Zig libc file backed by the NDK with a staged merged include tree, and API level 24 in the target string. |
+| 2026-10-29 | Extended Section 7.2 during implementation: the third `build-android` run showed that `termios` 0.2.2 (a `portable-pty` dependency of `rust-pty`) has no Android OS target and fails to compile for Android. The build now vendors the official crates.io archive of `termios` 0.2.2 (index checksum verified), patches in an Android module with Bionic's `NCCS` of 19, and substitutes it through a Cargo `[patch.crates-io]` section, keeping every version identical. Proven by a local build producing an AArch64 `librust_pty.so` depending only on `libc.so` and `libdl.so`. |
 
 ## 14. Acceptance Criteria
 
