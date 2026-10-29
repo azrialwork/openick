@@ -196,21 +196,22 @@ patch is rebased manually.
 | 2026-10-29 | Plan created. |
 | 2026-10-29 | Scope completion recorded during implementation: the feature also has a server face that Section 1 did not list — the `/global/upgrade` HTTP endpoint in the global API group and handler, and the `installation.updated` / `installation.update-available` event definitions in `packages/schema`. Both are deleted by patch `0008`, and Section 5 now lists them. The web application's update toast is not part of this surface: it calls the desktop platform bridge (`platform.updater`), which is undefined in the CLI-served web UI, and stays untouched under Section 4.2. |
 | 2026-10-29 | Gate 3 evidence note: with the command deleted, `opencode upgrade` is treated by the CLI as a project directory argument of the default command (its standard behavior for any unknown word) and no update action exists; the help output contains no upgrade entry. A configuration file carrying the removed `autoupdate` key loads normally, so no Section 9 defect arises. |
+| 2026-10-29 | Plan completed. Patch `0008` (26 files, +6/−1,613) passes all gates: the Section 8 inventory returns no hits on the materialized tree; typecheck is clean for `packages/core`, `packages/opencode`, `packages/tui`, and `packages/schema`; the touched upstream test suites pass (core config 15/15, opencode config 103/103, TUI components 5/5); `validate` is green on `main` (run `40891128998`); the release was republished (runs `40891851029` and `40892599310`) with exactly the ten assets of Plan 0003, Locked Decision 7; fresh downloads of the Linux x64 and Android archives verify against the published `SHA256SUMS`, and the published Linux x64 binary reports `1.19.5` with no upgrade entry in its help output. Per Locked Decision 6, no on-device testing was performed. |
 
 ## 11. Acceptance Criteria
 
-- [ ] Patch `0008` exists, carries the standard patch header, and is listed
+- [x] Patch `0008` exists, carries the standard patch header, and is listed
   in `patches/README.md`.
-- [ ] The materialized tree passes the Section 8 inventory check (gate 1).
-- [ ] Typecheck passes for the affected packages (gate 2).
-- [ ] The functional checks of the Linux build pass, including the unknown
+- [x] The materialized tree passes the Section 8 inventory check (gate 1).
+- [x] Typecheck passes for the affected packages (gate 2).
+- [x] The functional checks of the Linux build pass, including the unknown
   command answer for `opencode upgrade` and the legacy configuration key
   check (gate 3).
-- [ ] The `validate` workflow is green on `main` with the full delta
+- [x] The `validate` workflow is green on `main` with the full delta
   (gate 4).
-- [ ] The `v1.19.5` release is republished with exactly the ten assets of
+- [x] The `v1.19.5` release is republished with exactly the ten assets of
   Plan 0003, Locked Decision 7 (gate 5).
-- [ ] Fresh downloads verify against the published `SHA256SUMS`, and the
+- [x] Fresh downloads verify against the published `SHA256SUMS`, and the
   republished Linux x64 binary reports version `1.19.5` (gate 5).
-- [ ] `README.md` states that the binary has no self-update feature and that
+- [x] `README.md` states that the binary has no self-update feature and that
   new versions ship as Openick releases.
