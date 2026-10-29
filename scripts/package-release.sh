@@ -49,11 +49,8 @@ package_one() {
     exit 1
   fi
 
-  # The binary keeps its upstream file name: opencode, or opencode.exe on
-  # Windows targets.
-  if [[ -f "${SRC}/opencode.exe" ]]; then
-    cp "${SRC}/opencode.exe" "${STAGE}/opencode.exe"
-  elif [[ -f "${SRC}/opencode" ]]; then
+  # The binary keeps its upstream file name: opencode.
+  if [[ -f "${SRC}/opencode" ]]; then
     cp "${SRC}/opencode" "${STAGE}/opencode"
     chmod +x "${STAGE}/opencode"
   else
@@ -83,12 +80,6 @@ package_one "opencode-linux-x64"              "opencode-linux-x64.tar.gz"
 package_one "opencode-linux-x64-baseline"     "opencode-linux-x64-baseline.tar.gz"
 package_one "opencode-linux-x64-musl"         "opencode-linux-x64-musl.tar.gz"
 package_one "opencode-linux-x64-baseline-musl" "opencode-linux-x64-baseline-musl.tar.gz"
-package_one "opencode-darwin-arm64"           "opencode-darwin-arm64.zip"
-package_one "opencode-darwin-x64"             "opencode-darwin-x64.zip"
-package_one "opencode-darwin-x64-baseline"    "opencode-darwin-x64-baseline.zip"
-package_one "opencode-windows-arm64"          "opencode-windows-arm64.zip"
-package_one "opencode-windows-x64"            "opencode-windows-x64.zip"
-package_one "opencode-windows-x64-baseline"   "opencode-windows-x64-baseline.zip"
 
 # Materialized source archive, without VCS data, dependencies, or build
 # output.
