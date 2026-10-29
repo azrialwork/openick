@@ -215,9 +215,41 @@ if ! rustup target list --installed | grep -qx "${RUST_TARGET}"; then
   rustup target add "${RUST_TARGET}"
 fi
 
+# termios 0.2.2 (a portable-pty dependency) has no Android OS target. Vendor
+# the official crates.io archive, verify its index checksum, patch in the
+# Android module (scripts/termios-android.patch), and substitute the crate
+# through a [patch.crates-io] section. Plan 0002, Section 7.2.
+TERMIOS_VERSION="0.2.2"
+TERMIOS_SHA256="d5d9cf598a6d7ce700a4e6a9199da127e6819a61e64b68609683cc9a01b5683a"
+TERMIOS_DIR="${WORK_DIR}/termios-${TERMIOS_VERSION}"
+if [[ ! -d "${TERMIOS_DIR}" ]]; then
+  echo "natives: vendoring termios ${TERMIOS_VERSION} from crates.io"
+  curl -fsSL -o "${WORK_DIR}/termios.crate" \
+    "https://static.crates.io/crates/termios/termios-${TERMIOS_VERSION}.crate"
+  echo "${TERMIOS_SHA256}  ${WORK_DIR}/termios.crate" | sha256sum -c - > /dev/null
+  mkdir -p "${WORK_DIR}/termios-extract"
+  tar -xzf "${WORK_DIR}/termios.crate" -C "${WORK_DIR}/termios-extract"
+  mv "${WORK_DIR}/termios-extract/termios-${TERMIOS_VERSION}" "${TERMIOS_DIR}"
+  rm -rf "${WORK_DIR}/termios-extract"
+fi
+if [[ ! -f "${TERMIOS_DIR}/src/os/android.rs" ]]; then
+  (
+    cd "${TERMIOS_DIR}"
+    patch -p1 < "${SCRIPT_DIR}/termios-android.patch" > /dev/null
+  )
+fi
+if ! grep -q 'patch.crates-io' "${BUN_PTY_DIR}/rust-pty/Cargo.toml"; then
+  {
+    echo ""
+    echo "[patch.crates-io]"
+    echo "termios = { path = \"../termios-${TERMIOS_VERSION}\" }"
+  } >> "${BUN_PTY_DIR}/rust-pty/Cargo.toml"
+fi
+
 echo "natives: building rust-pty for ${RUST_TARGET}"
 (
   cd "${BUN_PTY_DIR}/rust-pty"
+  export PATH="${NDK_BIN}:${PATH}"
   export CC_aarch64_linux_android="${TARGET_CC}"
   export CXX_aarch64_linux_android="${TARGET_CXX}"
   export AR_aarch64_linux_android="${TARGET_AR}"
