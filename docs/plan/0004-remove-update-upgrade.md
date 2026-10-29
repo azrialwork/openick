@@ -131,8 +131,20 @@ Patch `0008-remove-update-upgrade.patch` deletes:
 - The `autoupdate` field in `packages/core/src/config.ts` and in the v1
   config schema and migration map, and its mention in the bundled
   customize-opencode skill document.
-- The parts of `packages/opencode/test/installation/installation.test.ts`
-  that test the deleted functions, per Locked Decision 8.
+- The `/global/upgrade` endpoint: its input and result schemas, path, and
+  endpoint definition in
+  `packages/opencode/src/server/routes/instance/httpapi/groups/global.ts`
+  and its handler in
+  `packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts`.
+- The installation update events (`installation.updated`,
+  `installation.update-available`): `packages/schema/src/installation-event.ts`
+  and their registration in `packages/schema/src/event-manifest.ts`.
+- The upstream tests that cover only the deleted surface, per Locked
+  Decision 8: `packages/opencode/test/installation/installation.test.ts`,
+  `packages/opencode/test/cli/upgrade.test.ts`,
+  `packages/opencode/test/server/httpapi-global.test.ts`, and
+  `packages/tui/test/component/dialog-update.test.ts` are deleted; the
+  `autoupdate` assertions in the two config test files are removed.
 
 ## 6. Packaging and Workflow Changes
 
@@ -182,6 +194,8 @@ patch is rebased manually.
 | Date | Amendment |
 | --- | --- |
 | 2026-10-29 | Plan created. |
+| 2026-10-29 | Scope completion recorded during implementation: the feature also has a server face that Section 1 did not list — the `/global/upgrade` HTTP endpoint in the global API group and handler, and the `installation.updated` / `installation.update-available` event definitions in `packages/schema`. Both are deleted by patch `0008`, and Section 5 now lists them. The web application's update toast is not part of this surface: it calls the desktop platform bridge (`platform.updater`), which is undefined in the CLI-served web UI, and stays untouched under Section 4.2. |
+| 2026-10-29 | Gate 3 evidence note: with the command deleted, `opencode upgrade` is treated by the CLI as a project directory argument of the default command (its standard behavior for any unknown word) and no update action exists; the help output contains no upgrade entry. A configuration file carrying the removed `autoupdate` key loads normally, so no Section 9 defect arises. |
 
 ## 11. Acceptance Criteria
 
