@@ -396,35 +396,36 @@ to describe the non-empty delta state.
 | 2026-10-29 | Corrected Section 7.1 during implementation: the Zig build of `libopentui` links the system libraries `dl` and `pthread`, whose Bionic stubs exist only in the Android NDK sysroot. The build therefore passes the NDK sysroot and API level 24 in the target string. The original text, which stated that no NDK is involved in the Zig build, was wrong; the first `build-android` run failed with `unable to find dynamic system library 'dl'`. |
 | 2026-10-29 | Corrected Section 7.1 again during implementation, superseding the `--sysroot` formulation of the previous amendment: `--sysroot` does not make Zig search the sysroot for explicitly linked system libraries, Zig 0.15.2 cannot provide a libc for the Android target at all, and the NDK ships no `libpthread` stub (Bionic carries pthread in libc). The final mechanism, proven by a local build of the pinned sources producing an AArch64 `libopentui.so` depending only on `libdl.so`, `libm.so`, and `libc.so`, is: a small `build.zig` patch for the Android ABI (`scripts/opentui-zig-android.patch`), a generated Zig libc file backed by the NDK with a staged merged include tree, and API level 24 in the target string. |
 | 2026-10-29 | Extended Section 7.2 during implementation: the third `build-android` run showed that `termios` 0.2.2 (a `portable-pty` dependency of `rust-pty`) has no Android OS target and fails to compile for Android. The build now vendors the official crates.io archive of `termios` 0.2.2 (index checksum verified), patches in an Android module with Bionic's `NCCS` of 19, and substitutes it through a Cargo `[patch.crates-io]` section, keeping every version identical. Proven by a local build producing an AArch64 `librust_pty.so` depending only on `libc.so` and `libdl.so`. |
+| 2026-10-29 | Recorded completion of all acceptance criteria in Section 14. The `validate` workflow passes on `main` with this delta. `build-android` run 40850976942 (publish=false) built both native libraries and the target and passed the ELF identity gate; its artifact passed the full on-device smoke test on a real Android ARM64 device in Termux (`--version` 1.19.5, healthy server with session creation and web UI, a full mock-model `opencode run` round trip, and the TUI rendering its interface), after which the device was restored and verified identical by snapshot diff. `build-android` run 40852459631 (publish=true) then published `opencode-android-arm64.tar.gz` to the `v1.19.5` release (16 assets) and regenerated `SHA256SUMS`; a fresh download of the asset verifies against the published sums. |
 
 ## 14. Acceptance Criteria
 
 This plan is implemented when every item is true:
 
-- [ ] This plan file exists and the implementation matches it.
-- [ ] `patches/0001-build-android-target.patch` and
+- [x] This plan file exists and the implementation matches it.
+- [x] `patches/0001-build-android-target.patch` and
       `patches/0002-register-opentui-core-android.patch` apply cleanly to
       the pinned upstream tree, and
       `overlay/patches/@opentui%2Fcore@0.4.5.patch` is registered and
       applied by `bun install` in the materialized tree.
-- [ ] `./scripts/materialize.sh` completes against the pinned tag with this
+- [x] `./scripts/materialize.sh` completes against the pinned tag with this
       delta, and the tree-phase branding guard passes.
-- [ ] The `validate` workflow passes on `main` with this delta.
-- [ ] A `build-android` dispatch with `publish=false` for the pinned tag
+- [x] The `validate` workflow passes on `main` with this delta.
+- [x] A `build-android` dispatch with `publish=false` for the pinned tag
       completes and stages `opencode-android-arm64.tar.gz` as a workflow
       artifact.
-- [ ] The staged binary passes the artifact identity gate: ELF 64-bit
+- [x] The staged binary passes the artifact identity gate: ELF 64-bit
       AArch64, interpreter `/system/bin/linker64`.
-- [ ] The on-device smoke test passes in full on a real Android ARM64
+- [x] The on-device smoke test passes in full on a real Android ARM64
       device, including the TUI rendering gate, and the device is restored
       and verified by snapshot diff afterwards.
-- [ ] A `build-android` dispatch with `publish=true` adds
+- [x] A `build-android` dispatch with `publish=true` adds
       `opencode-android-arm64.tar.gz` to the GitHub Release of the pinned
       tag, and the release `SHA256SUMS` covers it and verifies against a
       fresh download.
-- [ ] `README.md`, `patches/README.md`, and `overlay/README.md` describe
+- [x] `README.md`, `patches/README.md`, and `overlay/README.md` describe
       the implemented state and contain no statement that contradicts this
       plan.
-- [ ] The commit history that lands this work on `main` consists of atomic
+- [x] The commit history that lands this work on `main` consists of atomic
       commits as defined in Plan 0001 Section 16, with one logical change
       per commit.
