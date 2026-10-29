@@ -1,0 +1,48 @@
+diff --git a/chunk-bun-t2myhmwd.js b/chunk-bun-t2myhmwd.js
+index 701d70d..735a77a 100644
+--- a/chunk-bun-t2myhmwd.js
++++ b/chunk-bun-t2myhmwd.js
+@@ -7899,6 +7899,7 @@ function resolveBundledDefaultParserAsset(relativePath, fallbackPath) {
+ var NATIVE_FILE_NAMES = {
+   darwin: "libopentui.dylib",
+   linux: "libopentui.so",
++  android: "libopentui.so",
+   win32: "opentui.dll"
+ };
+ function getNativeAssetDescriptor(target) {
+@@ -7982,6 +7983,11 @@ async function resolveNativeLibraryPath() {
+       return (await import("@opentui/core-win32-arm64")).default;
+     }
+   }
++  if (process.platform === "android") {
++    if (process.arch === "arm64") {
++      return (await import("@opentui/core-android-arm64")).default;
++    }
++  }
+   throw new Error(`OpenTUI is not supported on the current platform: ${asset.packageName}`);
+ }
+ 
+diff --git a/chunk-node-q0cwyvm9.js b/chunk-node-q0cwyvm9.js
+index be7df0e..0937267 100644
+--- a/chunk-node-q0cwyvm9.js
++++ b/chunk-node-q0cwyvm9.js
+@@ -7908,6 +7908,7 @@ class ProcessQueue {
+ var NATIVE_FILE_NAMES = {
+   darwin: "libopentui.dylib",
+   linux: "libopentui.so",
++  android: "libopentui.so",
+   win32: "opentui.dll"
+ };
+ function getNativeAssetDescriptor(target) {
+diff --git a/node-assets.js b/node-assets.js
+index c722956..697207e 100644
+--- a/node-assets.js
++++ b/node-assets.js
+@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
+ var NATIVE_FILE_NAMES = {
+   darwin: "libopentui.dylib",
+   linux: "libopentui.so",
++  android: "libopentui.so",
+   win32: "opentui.dll"
+ };
+ function getNativeAssetDescriptor(target) {
