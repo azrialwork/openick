@@ -230,18 +230,29 @@ in Section 8 is its only caller.
 
 1. Clone `anomalyco/opentui` at tag `v0.4.5` into the work directory and
    verify the checked-out commit is the commit the tag points to.
-2. In `packages/core/src/zig`, run
-   `zig build -Dtarget=aarch64-linux-android.24 --sysroot <NDK sysroot> -Doptimize=ReleaseFast`.
-   Zig 0.15.2 cross-compiles the library, including its bundled C and C++
-   components, using its own Android libc headers and libc++ support. The
-   build script links the system libraries `dl` and `pthread`, which on
-   Bionic are stub libraries that live only in the Android NDK sysroot, so
-   the NDK sysroot is passed to the Zig build for library resolution; the
-   target string carries the Android API level, 24. (Corrected during
-   implementation: the first workflow run proved that Zig's bundled
-   Android support contains no `dl`/`pthread` stubs to link against. See
-   Section 13.)
-3. Stage the produced `libopentui.so` as an npm-shaped platform package at
+2. Apply `scripts/opentui-zig-android.patch` to the OpenTUI checkout. The
+   patch changes one branch of `packages/core/src/zig/build.zig`: for the
+   Android ABI it links only `dl` (Bionic carries the pthread symbols
+   inside libc; no `libpthread` stub exists in the NDK to link against,
+   and the resulting library must not gain a `libpthread.so` dependency)
+   and it takes the NDK library directory from the
+   `OPENICK_ANDROID_LIB_DIR` environment variable so the `libdl` stub
+   resolves. No other target is affected.
+3. In `packages/core/src/zig`, run
+   `zig build -Dtarget=aarch64-linux-android.24 --libc <libc-file> -Doptimize=ReleaseFast`
+   with `OPENICK_ANDROID_LIB_DIR` set to the NDK sysroot library directory
+   for API 24. Zig 0.15.2 cannot provide a libc for the Android target, so
+   the natives script generates the libc file from the NDK: its include
+   directories name a staged merge of the sysroot's generic and
+   AArch64 include trees (the arch-specific headers, for example
+   `asm/types.h`, are invisible to Zig otherwise), and its `crt_dir`
+   names the sysroot library directory for API 24. The target string
+   carries the Android API level, 24. The produced `libopentui.so` is an
+   AArch64 ELF whose only library dependencies are `libdl.so`, `libm.so`,
+   and `libc.so`. (Established during implementation by a local build of
+   the exact pinned sources; the earlier `--sysroot` formulation was
+   superseded. See Section 13.)
+4. Stage the produced `libopentui.so` as an npm-shaped platform package at
    `<assets-dir>/core-android-arm64/`, mirroring the published
    `@opentui/core-linux-arm64` 0.4.5 package file for file: `package.json`
    (name `@opentui/core-android-arm64`, version `0.4.5`, `os: ["android"]`,
@@ -351,6 +362,7 @@ patches/0002-register-opentui-core-android.patch
                                                Section 6.2
 overlay/patches/@opentui%2Fcore@0.4.5.patch    Section 6.3
 scripts/build-android-natives.sh               Section 7
+scripts/opentui-zig-android.patch              Section 7.1
 .github/workflows/build-android.yml            Section 8
 ```
 
@@ -363,6 +375,7 @@ to describe the non-empty delta state.
 | --- | --- |
 | 2026-10-29 | Initial version of this plan. |
 | 2026-10-29 | Corrected Section 7.1 during implementation: the Zig build of `libopentui` links the system libraries `dl` and `pthread`, whose Bionic stubs exist only in the Android NDK sysroot. The build therefore passes the NDK sysroot and API level 24 in the target string. The original text, which stated that no NDK is involved in the Zig build, was wrong; the first `build-android` run failed with `unable to find dynamic system library 'dl'`. |
+| 2026-10-29 | Corrected Section 7.1 again during implementation, superseding the `--sysroot` formulation of the previous amendment: `--sysroot` does not make Zig search the sysroot for explicitly linked system libraries, Zig 0.15.2 cannot provide a libc for the Android target at all, and the NDK ships no `libpthread` stub (Bionic carries pthread in libc). The final mechanism, proven by a local build of the pinned sources producing an AArch64 `libopentui.so` depending only on `libdl.so`, `libm.so`, and `libc.so`, is: a small `build.zig` patch for the Android ABI (`scripts/opentui-zig-android.patch`), a generated Zig libc file backed by the NDK with a staged merged include tree, and API level 24 in the target string. |
 
 ## 14. Acceptance Criteria
 
