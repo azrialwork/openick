@@ -216,6 +216,8 @@ run definition, following the Plan 0002 staging protocol.
 | Date | Amendment |
 | --- | --- |
 | 2026-10-29 | Plan created. |
+| 2026-10-29 | Scope correction recorded during implementation: Section 4.2 left upstream tests untouched, but two test files reference the deleted surface and fail typecheck otherwise. Tests that reference a deleted API are therefore updated inside the same patch that deletes the API: the core and opencode shell tests in patch `0004`, and the managed-plist tests in patch `0007`. No other test changes are in scope. |
+| 2026-10-29 | Section 5.3 correction recorded during implementation: a third import site of `terminal-win32` exists in `packages/opencode/src/cli/cmd/tui.ts` (the Ctrl-C guard). It is deleted by patch `0007`, which owns that file's remaining changes; patch `0005` keeps the module deletion and the `app.tsx` sites. |
 
 ## 11. Acceptance Criteria
 
