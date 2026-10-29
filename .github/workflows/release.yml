@@ -11,6 +11,11 @@ on:
         description: "Upstream tag to release. Must equal the pin in upstream.json."
         required: true
         type: string
+      force:
+        description: "Delete an existing release for the tag (the git tag is kept) and publish it again. Used by Plan 0003 republication."
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ inputs.tag }}
@@ -46,8 +51,14 @@ jobs:
         id: existing
         run: |
           if gh release view "${{ steps.pin.outputs.tag }}" > /dev/null 2>&1; then
-            echo "exists=true" >> "${GITHUB_OUTPUT}"
-            echo "Release ${{ steps.pin.outputs.tag }} already exists. Nothing to do."
+            if [ "${{ inputs.force }}" = "true" ]; then
+              echo "Force republication: deleting the existing release (the git tag is kept)."
+              gh release delete "${{ steps.pin.outputs.tag }}" --yes
+              echo "exists=false" >> "${GITHUB_OUTPUT}"
+            else
+              echo "exists=true" >> "${GITHUB_OUTPUT}"
+              echo "Release ${{ steps.pin.outputs.tag }} already exists. Nothing to do."
+            fi
           else
             echo "exists=false" >> "${GITHUB_OUTPUT}"
           fi
