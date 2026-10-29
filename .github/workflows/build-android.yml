@@ -1,0 +1,130 @@
+name: build-android
+
+# Builds the Android ARM64 (Bionic) CLI target of the pinned upstream
+# release and, on request, publishes it as an additional asset of that
+# release. Every build step runs in this workflow.
+# See docs/plan/0002-android-arm64-build.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build. Must equal the pin in upstream.json."
+        required: true
+        type: string
+      publish:
+        description: "Publish the asset to the GitHub Release after building. Requires the on-device verification gate of Plan 0002, Section 9 to have passed."
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-android-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Confirm the requested tag equals the pin
+        id: pin
+        run: |
+          PIN_TAG="$(jq -r '.tag' upstream.json)"
+          if [ "${PIN_TAG}" != "${{ inputs.tag }}" ]; then
+            echo "error: requested tag ${{ inputs.tag }} does not equal the pin ${PIN_TAG}" >&2
+            exit 1
+          fi
+          echo "tag=${PIN_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=$(jq -r '.version' upstream.json)" >> "${GITHUB_OUTPUT}"
+          echo "commit=$(jq -r '.commit' upstream.json)" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up the Rust Android target
+        run: rustup target add aarch64-linux-android
+
+      - name: Materialize the pinned release with the delta
+        run: ./scripts/materialize.sh "${RUNNER_TEMP}/materialized"
+
+      - name: Build the Android native libraries
+        run: |
+          ./scripts/build-android-natives.sh \
+            "${RUNNER_TEMP}/android-natives" \
+            "${RUNNER_TEMP}/android-assets"
+
+      - name: Install dependencies in the materialized tree
+        run: |
+          cd "${RUNNER_TEMP}/materialized/tree"
+          bun install
+
+      - name: Build the Android target
+        run: |
+          cd "${RUNNER_TEMP}/materialized/tree"
+          OPENCODE_VERSION="${{ steps.pin.outputs.version }}" \
+          OPENICK_ANDROID_ASSETS="${RUNNER_TEMP}/android-assets" \
+            bun run ./packages/opencode/script/build.ts --android
+
+      - name: Verify the artifact identity and package it
+        id: package
+        run: |
+          BIN="${RUNNER_TEMP}/materialized/tree/packages/opencode/dist/opencode-android-arm64/bin/opencode"
+          test -f "${BIN}"
+          file "${BIN}"
+          file "${BIN}" | grep -E "ELF 64-bit.*ARM aarch64" > /dev/null
+          readelf -l "${BIN}" | grep "Requesting program interpreter: /system/bin/linker64" > /dev/null
+          mkdir -p "${RUNNER_TEMP}/android-release"
+          tar -czf "${RUNNER_TEMP}/android-release/opencode-android-arm64.tar.gz" -C "$(dirname "${BIN}")" opencode
+          ls -la "${RUNNER_TEMP}/android-release"
+          sha256sum "${RUNNER_TEMP}/android-release/opencode-android-arm64.tar.gz"
+
+      - name: Upload the build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-android-arm64-${{ steps.pin.outputs.tag }}
+          path: ${{ runner.temp }}/android-release/opencode-android-arm64.tar.gz
+          if-no-files-found: error
+
+      - name: Publish the asset to the GitHub Release
+        if: inputs.publish
+        run: |
+          gh release upload "${{ steps.pin.outputs.tag }}" \
+            "${RUNNER_TEMP}/android-release/opencode-android-arm64.tar.gz" \
+            --clobber --repo "${GITHUB_REPOSITORY}"
+
+      - name: Regenerate SHA256SUMS for the full release
+        if: inputs.publish
+        run: |
+          SUMS_DIR="${RUNNER_TEMP}/release-sums"
+          mkdir -p "${SUMS_DIR}"
+          gh release download "${{ steps.pin.outputs.tag }}" \
+            --dir "${SUMS_DIR}" --repo "${GITHUB_REPOSITORY}"
+          rm -f "${SUMS_DIR}/SHA256SUMS"
+          cd "${SUMS_DIR}"
+          sha256sum ./* > SHA256SUMS
+          sha256sum -c SHA256SUMS > /dev/null
+          gh release upload "${{ steps.pin.outputs.tag }}" SHA256SUMS \
+            --clobber --repo "${GITHUB_REPOSITORY}"
+
+      - name: Audit the published release
+        if: inputs.publish
+        run: |
+          gh release view "${{ steps.pin.outputs.tag }}" --json tagName,assets \
+            --jq '{tag: .tagName, assets: [.assets[].name]}'
