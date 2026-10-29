@@ -38,6 +38,11 @@ binary. See `scripts/verify-branding.sh`.
    and publishes a GitHub Release whose tag is identical to the upstream tag.
    The release also carries the materialized source archive, the delta
    manifest, and a `SHA256SUMS` checksum file.
+7. **Android build.** A separate workflow builds one additional target,
+   Android ARM64 (Bionic), entirely on GitHub Actions, and publishes it to
+   the same release as the asset `opencode-android-arm64.tar.gz`. The
+   native libraries this target needs are built in the workflow from their
+   pinned upstream sources. See `docs/plan/0002-android-arm64-build.md`.
 
 A patch that no longer applies to a new upstream release blocks the update.
 The pin stays on the previous version, and the workflow opens an issue that
@@ -51,7 +56,7 @@ names the failing patch and the target release.
 | `patches/` | Numbered patches applied to the upstream tree, in filename order. |
 | `overlay/` | Whole files added to or replaced in the upstream tree, mirroring its layout. |
 | `scripts/` | Detection, materialization, branding guard, and packaging scripts. |
-| `.github/workflows/` | The six-hour check, the validation workflow, and the release workflow. |
+| `.github/workflows/` | The six-hour check, the validation workflow, the release workflow, and the Android build workflow. |
 | `docs/plan/` | Numbered plan files. One file covers one context and states decisions without alternatives. |
 
 ## Releases
@@ -67,6 +72,12 @@ and overlay file with digests in `delta-manifest.json`, and provides
 Openick releases contain the OpenCode CLI only. Desktop installers are built
 and signed by the upstream project and are available from the
 [upstream releases](https://github.com/anomalyco/opencode/releases).
+
+Each release also carries an Android ARM64 build of the CLI,
+`opencode-android-arm64.tar.gz`, which runs natively on Android (Bionic),
+for example inside Termux on an ARM64 device. It is the same OpenCode
+binary, built for the Android target under
+`docs/plan/0002-android-arm64-build.md`.
 
 ## Documentation and Governance
 
