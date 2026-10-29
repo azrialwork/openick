@@ -42,9 +42,27 @@ BUN_PTY_REPOSITORY="sursaone/bun-pty"
 BUN_PTY_COMMIT="41dd5b887f3f47d7c307fd93f828a75dbee97d5a"
 ANDROID_API="24"
 RUST_TARGET="aarch64-linux-android"
-ZIG_TARGET="aarch64-linux-android"
+ZIG_TARGET="aarch64-linux-android.${ANDROID_API}"
 
 mkdir -p "${WORK_DIR}" "${ASSETS_DIR}"
+
+# The Android NDK is resolved once, up front: the Rust build needs its
+# toolchain, and the Zig build needs its sysroot, which holds the Bionic
+# stub libraries (dl, pthread) that libopentui links against.
+if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
+  SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+  ANDROID_NDK_HOME="$(ls -d "${SDK_ROOT}"/ndk/* 2>/dev/null | sort -V | tail -n 1 || true)"
+fi
+if [[ -z "${ANDROID_NDK_HOME:-}" || ! -d "${ANDROID_NDK_HOME}" ]]; then
+  echo "error: no Android NDK found; set ANDROID_NDK_HOME" >&2
+  exit 1
+fi
+echo "natives: using Android NDK at ${ANDROID_NDK_HOME}"
+NDK_SYSROOT="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+if [[ ! -d "${NDK_SYSROOT}" ]]; then
+  echo "error: NDK sysroot not found: ${NDK_SYSROOT}" >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # libopentui (Zig)
@@ -66,7 +84,7 @@ fi
 echo "natives: building libopentui for ${ZIG_TARGET} with Zig $(zig version)"
 (
   cd "${OPENTUI_DIR}/packages/core/src/zig"
-  zig build "-Dtarget=${ZIG_TARGET}" -Doptimize=ReleaseFast
+  zig build "-Dtarget=${ZIG_TARGET}" --sysroot "${NDK_SYSROOT}" -Doptimize=ReleaseFast
 )
 
 LIBOPENTUI="$(find "${OPENTUI_DIR}/packages/core/src/lib" -name 'libopentui.so' -type f | head -n 1)"
@@ -141,16 +159,6 @@ fi
 # ---------------------------------------------------------------------------
 # bun-pty Rust library (Cargo)
 # ---------------------------------------------------------------------------
-
-if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
-  SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-  ANDROID_NDK_HOME="$(ls -d "${SDK_ROOT}"/ndk/* 2>/dev/null | sort -V | tail -n 1 || true)"
-fi
-if [[ -z "${ANDROID_NDK_HOME:-}" || ! -d "${ANDROID_NDK_HOME}" ]]; then
-  echo "error: no Android NDK found; set ANDROID_NDK_HOME" >&2
-  exit 1
-fi
-echo "natives: using Android NDK at ${ANDROID_NDK_HOME}"
 
 NDK_BIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
 TARGET_CC="${NDK_BIN}/aarch64-linux-android${ANDROID_API}-clang"
