@@ -33,16 +33,22 @@ binary. See `scripts/verify-branding.sh`.
 5. **Auto-merge.** A fully validated pin update is committed directly to
    `main` by the workflow. No pull request and no human approval are involved
    in a routine upstream update.
-6. **Release.** The release workflow builds the OpenCode CLI for Linux,
-   macOS, and Windows, packages the binaries under the upstream asset names,
-   and publishes a GitHub Release whose tag is identical to the upstream tag.
-   The release also carries the materialized source archive, the delta
-   manifest, and a `SHA256SUMS` checksum file.
+6. **Release.** The release workflow builds the OpenCode CLI for Linux
+   (every Linux variant the upstream build defines), packages the binaries
+   under the upstream asset names, and publishes a GitHub Release whose tag
+   is identical to the upstream tag. The release also carries the
+   materialized source archive, the delta manifest, and a `SHA256SUMS`
+   checksum file.
 7. **Android build.** A separate workflow builds one additional target,
    Android ARM64 (Bionic), entirely on GitHub Actions, and publishes it to
    the same release as the asset `opencode-android-arm64.tar.gz`. The
    native libraries this target needs are built in the workflow from their
    pinned upstream sources. See `docs/plan/0002-android-arm64-build.md`.
+
+Openick builds for Linux and Android only, and its shell layer runs Bash
+only. The delta deletes the Windows and macOS code and every other shell
+from the materialized source; it does not hide or disable them. See
+`docs/plan/0003-linux-android-bash-only.md`.
 
 A patch that no longer applies to a new upstream release blocks the update.
 The pin stays on the previous version, and the workflow opens an issue that
