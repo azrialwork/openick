@@ -50,6 +50,11 @@ only. The delta deletes the Windows and macOS code and every other shell
 from the materialized source; it does not hide or disable them. See
 `docs/plan/0003-linux-android-bash-only.md`.
 
+The binary has no self-update feature: the upstream `opencode upgrade`
+command, its update checks, and its update notifications are deleted by
+the delta. New versions of the software ship as new Openick releases.
+See `docs/plan/0004-remove-update-upgrade.md`.
+
 A patch that no longer applies to a new upstream release blocks the update.
 The pin stays on the previous version, and the workflow opens an issue that
 names the failing patch and the target release.
