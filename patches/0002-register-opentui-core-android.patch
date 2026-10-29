@@ -1,0 +1,17 @@
+Purpose: Register the Openick dependency patch for @opentui/core 0.4.5 in the upstream patchedDependencies map, so Bun applies patches/@opentui%2Fcore@0.4.5.patch (supplied by the Openick overlay) on every install. The dependency patch teaches the OpenTUI native asset loader the android-arm64 target (Plan 0002, Section 6.2).
+Upstream files: package.json
+Rebase note: The patchedDependencies map is the only anchor. If upstream registers its own patch for @opentui/core, merge the two entries instead of replacing either.
+
+diff --git a/package.json b/package.json
+index d554a19..22283c3 100644
+--- a/package.json
++++ b/package.json
+@@ -165,6 +165,7 @@
+     "@ai-sdk/groq@3.0.31": "patches/@ai-sdk%2Fgroq@3.0.31.patch",
+     "@ai-sdk/anthropic@3.0.111": "patches/@ai-sdk%2Fanthropic@3.0.111.patch",
+     "@ai-sdk/amazon-bedrock@4.0.166": "patches/@ai-sdk%2Famazon-bedrock@4.0.166.patch",
+-    "@ai-sdk/openai@3.0.88": "patches/@ai-sdk%2Fopenai@3.0.88.patch"
++    "@ai-sdk/openai@3.0.88": "patches/@ai-sdk%2Fopenai@3.0.88.patch",
++    "@opentui/core@0.4.5": "patches/@opentui%2Fcore@0.4.5.patch"
+   }
+ }
