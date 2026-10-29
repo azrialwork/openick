@@ -1,0 +1,97 @@
+Purpose: Restrict the upstream build script to the Linux target family (Plan 0003, Locked Decision 1). Every darwin and win32 entry is deleted from the target list, together with the code that existed only for them: the win32-to-windows name mapping, the Windows bunfs root, the compile windows options, the macOS re-signing step, and the zip form of the script's own release packaging. The --android mode of patch 0001 is untouched; a default build now produces Linux targets only.
+Upstream files: packages/opencode/script/build.ts
+Rebase note: Check the target list first; upstream adds targets there. The --android ternary and the tarball condition come from patch 0001 and must survive the rebase.
+
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+index ef53cb0..196a062 100755
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -86,32 +86,6 @@ const allTargets: {
+     abi: "musl",
+     avx2: false,
+   },
+-  {
+-    os: "darwin",
+-    arch: "arm64",
+-  },
+-  {
+-    os: "darwin",
+-    arch: "x64",
+-  },
+-  {
+-    os: "darwin",
+-    arch: "x64",
+-    avx2: false,
+-  },
+-  {
+-    os: "win32",
+-    arch: "arm64",
+-  },
+-  {
+-    os: "win32",
+-    arch: "x64",
+-  },
+-  {
+-    os: "win32",
+-    arch: "x64",
+-    avx2: false,
+-  },
+ ]
+ 
+ const targets = androidFlag
+@@ -171,8 +145,7 @@ if (androidFlag) {
+ for (const item of targets) {
+   const name = [
+     pkg.name,
+-    // changing to win32 flags npm for some reason
+-    item.os === "win32" ? "windows" : item.os,
++    item.os,
+     item.arch,
+     item.avx2 === false ? "baseline" : undefined,
+     item.abi === undefined ? undefined : item.abi,
+@@ -184,7 +157,7 @@ for (const item of targets) {
+ 
+   const workerPath = "./src/cli/tui/worker.ts"
+   const treeSitterWorkerPath = "opentui-tree-sitter-worker.js"
+-  const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
++  const bunfsRoot = "/$bunfs/root/"
+ 
+   await Bun.build({
+     conditions: ["bun", "node"],
+@@ -203,7 +176,6 @@ for (const item of targets) {
+       target: (item.os === "android" ? "bun-linux-arm64-android" : name.replace(pkg.name, "bun")) as any,
+       outfile: `dist/${name}/bin/opencode`,
+       execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
+-      windows: {},
+     },
+     files: {
+       [treeSitterWorkerPath]: treeSitterWorker,
+@@ -227,12 +199,6 @@ for (const item of targets) {
+     },
+   })
+ 
+-  // Embedding the bundle invalidates the linker's ad-hoc signature, and macOS 27+
+-  // SIGKILLs binaries with invalid pages. Re-sign ad-hoc; release CI re-signs with Developer ID.
+-  if (item.os === "darwin" && process.platform === "darwin") {
+-    await $`codesign --force --sign - dist/${name}/bin/opencode`
+-  }
+-
+   // Smoke test: only run if binary is for current platform
+   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
+     const binaryPath = `dist/${name}/bin/opencode`
+@@ -266,13 +232,9 @@ for (const item of targets) {
+ 
+ if (Script.release) {
+   for (const key of Object.keys(binaries)) {
+-    if (key.includes("linux") || key.includes("android")) {
+-      await $`tar -czf ../../${key}.tar.gz *`.cwd(`dist/${key}/bin`)
+-    } else {
+-      await $`zip -r ../../${key}.zip *`.cwd(`dist/${key}/bin`)
+-    }
++    await $`tar -czf ../../${key}.tar.gz *`.cwd(`dist/${key}/bin`)
+   }
+-  await $`gh release upload v${Script.version} ./dist/*.zip ./dist/*.tar.gz --clobber --repo ${process.env.GH_REPO}`
++  await $`gh release upload v${Script.version} ./dist/*.tar.gz --clobber --repo ${process.env.GH_REPO}`
+ }
+ 
+ export { binaries }
