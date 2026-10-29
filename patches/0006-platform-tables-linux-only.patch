@@ -1,0 +1,567 @@
+Purpose: Trim the platform data tables and per-LSP install logic to Linux and Android (Plan 0003, Section 5.4). In the LSP server definitions, every darwin and win32 download variant, executable suffix choice, and archive-format branch is deleted across all language servers (including the Python venv Scripts layout, the Eclipse JDT config switch, and the Clojure .exe lookup); Linux entries and behavior are preserved, and Android keeps its existing no-asset outcome. The ripgrep platform map keeps its two Linux entries, and the PowerShell-based zip extraction path is deleted with the zip entries it served.
+Upstream files: packages/opencode/src/lsp/server.ts, packages/core/src/ripgrep/binary.ts
+Rebase note: This is the fastest-moving file in the stack; upstream edits LSP definitions constantly. Rebase server by server: each definition keeps only its Linux download form. Watch for new servers that arrive with platform tables of their own.
+
+diff --git a/packages/core/src/ripgrep/binary.ts b/packages/core/src/ripgrep/binary.ts
+index 762a8e6..f272f9a 100644
+--- a/packages/core/src/ripgrep/binary.ts
++++ b/packages/core/src/ripgrep/binary.ts
+@@ -13,13 +13,8 @@ import { which } from "../util/which"
+ export namespace RipgrepBinary {
+   const VERSION = "15.1.0"
+   const PLATFORM = {
+-    "arm64-darwin": { platform: "aarch64-apple-darwin", extension: "tar.gz" },
+     "arm64-linux": { platform: "aarch64-unknown-linux-gnu", extension: "tar.gz" },
+-    "x64-darwin": { platform: "x86_64-apple-darwin", extension: "tar.gz" },
+     "x64-linux": { platform: "x86_64-unknown-linux-musl", extension: "tar.gz" },
+-    "arm64-win32": { platform: "aarch64-pc-windows-msvc", extension: "zip" },
+-    "ia32-win32": { platform: "i686-pc-windows-msvc", extension: "zip" },
+-    "x64-win32": { platform: "x86_64-pc-windows-msvc", extension: "zip" },
+   } as const
+ 
+   interface Interface {
+@@ -55,20 +50,6 @@ export namespace RipgrepBinary {
+       ) {
+         const dir = yield* fs.makeTempDirectoryScoped({ directory: Global.Path.bin, prefix: "ripgrep-" })
+ 
+-        if (config.extension === "zip") {
+-          const shell = (yield* Effect.sync(() => which("powershell.exe") ?? which("pwsh.exe"))) ?? "powershell.exe"
+-          const result = yield* run(shell, [
+-            "-NoProfile",
+-            "-NonInteractive",
+-            "-Command",
+-            `$global:ProgressPreference = 'SilentlyContinue'; Expand-Archive -LiteralPath '${archive.replaceAll("'", "''")}' -DestinationPath '${dir.replaceAll("'", "''")}' -Force`,
+-          ])
+-          if (result.code !== 0)
+-            throw new Error(
+-              result.stderr.trim() || result.stdout.trim() || `ripgrep extraction failed with code ${result.code}`,
+-            )
+-        }
+-
+         if (config.extension === "tar.gz") {
+           const result = yield* run("tar", ["-xzf", archive, "-C", dir])
+           if (result.code !== 0)
+@@ -80,21 +61,21 @@ export namespace RipgrepBinary {
+         const extracted = path.join(
+           dir,
+           `ripgrep-${VERSION}-${config.platform}`,
+-          process.platform === "win32" ? "rg.exe" : "rg",
++          "rg",
+         )
+         if (!(yield* fs.isFile(extracted))) throw new Error(`ripgrep archive did not contain executable: ${extracted}`)
+ 
+         yield* fs.copyFile(extracted, target)
+-        if (process.platform !== "win32") yield* fs.chmod(target, 0o755)
++        yield* fs.chmod(target, 0o755)
+       }, Effect.scoped)
+ 
+       return Service.of({
+         filepath: yield* Effect.cached(
+           Effect.gen(function* () {
+-            const system = yield* Effect.sync(() => which(process.platform === "win32" ? "rg.exe" : "rg"))
++            const system = yield* Effect.sync(() => which("rg"))
+             if (system && (yield* fs.isFile(system).pipe(Effect.orDie))) return system
+ 
+-            const target = path.join(Global.Path.bin, `rg${process.platform === "win32" ? ".exe" : ""}`)
++            const target = path.join(Global.Path.bin, "rg")
+             if (yield* fs.isFile(target).pipe(Effect.orDie)) return target
+ 
+             const platformKey = `${process.arch}-${process.platform}` as keyof typeof PLATFORM
+diff --git a/packages/opencode/src/lsp/server.ts b/packages/opencode/src/lsp/server.ts
+index 2be68aa..f078697 100644
+--- a/packages/opencode/src/lsp/server.ts
++++ b/packages/opencode/src/lsp/server.ts
+@@ -203,9 +203,8 @@ export const ESLint: Info = {
+       }
+       await fs.rename(extractedPath, finalPath)
+ 
+-      const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm"
+-      await Process.run([npmCmd, "install"], { cwd: finalPath })
+-      await Process.run([npmCmd, "run", "compile"], { cwd: finalPath })
++      await Process.run(["npm", "install"], { cwd: finalPath })
++      await Process.run(["npm", "run", "compile"], { cwd: finalPath })
+     }
+ 
+     const proc = spawn("node", [serverPath, "--stdio"], {
+@@ -234,10 +233,8 @@ export const Oxlint: Info = {
+   ]),
+   extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".vue", ".astro", ".svelte"],
+   async spawn(root, ctx) {
+-    const ext = process.platform === "win32" ? ".cmd" : ""
+-
+-    const serverTarget = path.join("node_modules", ".bin", "oxc_language_server" + ext)
+-    const lintTarget = path.join("node_modules", ".bin", "oxlint" + ext)
++    const serverTarget = path.join("node_modules", ".bin", "oxc_language_server")
++    const lintTarget = path.join("node_modules", ".bin", "oxlint")
+ 
+     const resolveBin = async (target: string) => {
+       const localBin = path.join(root, target)
+@@ -379,7 +376,7 @@ export const Gopls: Info = {
+       if (exit !== 0) {
+         return
+       }
+-      bin = path.join(Global.Path.bin, "gopls" + (process.platform === "win32" ? ".exe" : ""))
++      bin = path.join(Global.Path.bin, "gopls")
+     }
+     return {
+       process: spawn(bin!, {
+@@ -411,7 +408,7 @@ export const Rubocop: Info = {
+       if (exit !== 0) {
+         return
+       }
+-      bin = path.join(Global.Path.bin, "rubocop" + (process.platform === "win32" ? ".exe" : ""))
++      bin = path.join(Global.Path.bin, "rubocop")
+     }
+     return {
+       process: spawn(bin!, ["--lsp"], {
+@@ -446,10 +443,7 @@ export const Ty: Info = {
+       (p): p is string => p !== undefined,
+     )
+     for (const venvPath of potentialVenvPaths) {
+-      const isWindows = process.platform === "win32"
+-      const potentialPythonPath = isWindows
+-        ? path.join(venvPath, "Scripts", "python.exe")
+-        : path.join(venvPath, "bin", "python")
++      const potentialPythonPath = path.join(venvPath, "bin", "python")
+       if (await Filesystem.exists(potentialPythonPath)) {
+         initialization["pythonPath"] = potentialPythonPath
+         break
+@@ -458,8 +452,7 @@ export const Ty: Info = {
+ 
+     if (!binary) {
+       for (const venvPath of potentialVenvPaths) {
+-        const isWindows = process.platform === "win32"
+-        const potentialTyPath = isWindows ? path.join(venvPath, "Scripts", "ty.exe") : path.join(venvPath, "bin", "ty")
++        const potentialTyPath = path.join(venvPath, "bin", "ty")
+         if (await Filesystem.exists(potentialTyPath)) {
+           binary = potentialTyPath
+           break
+@@ -503,10 +496,7 @@ export const Pyright: Info = {
+       (p): p is string => p !== undefined,
+     )
+     for (const venvPath of potentialVenvPaths) {
+-      const isWindows = process.platform === "win32"
+-      const potentialPythonPath = isWindows
+-        ? path.join(venvPath, "Scripts", "python.exe")
+-        : path.join(venvPath, "bin", "python")
++      const potentialPythonPath = path.join(venvPath, "bin", "python")
+       if (await Filesystem.exists(potentialPythonPath)) {
+         initialization["pythonPath"] = potentialPythonPath
+         break
+@@ -538,7 +528,7 @@ export const ElixirLS: Info = {
+         Global.Path.bin,
+         "elixir-ls-master",
+         "release",
+-        process.platform === "win32" ? "language_server.bat" : "language_server.sh",
++        "language_server.sh",
+       )
+ 
+       if (!(await Filesystem.exists(binary))) {
+@@ -615,24 +605,13 @@ export const Zls: Info = {
+       else if (arch === "x64") zlsArch = "x86_64"
+       else if (arch === "ia32") zlsArch = "x86"
+ 
+-      let zlsPlatform: string = platform
+-      if (platform === "darwin") zlsPlatform = "macos"
+-      else if (platform === "win32") zlsPlatform = "windows"
++      const zlsPlatform: string = platform
+ 
+-      const ext = platform === "win32" ? "zip" : "tar.xz"
++      const ext = "tar.xz"
+ 
+       assetName = `zls-${zlsArch}-${zlsPlatform}.${ext}`
+ 
+-      const supportedCombos = [
+-        "zls-x86_64-linux.tar.xz",
+-        "zls-x86_64-macos.tar.xz",
+-        "zls-x86_64-windows.zip",
+-        "zls-aarch64-linux.tar.xz",
+-        "zls-aarch64-macos.tar.xz",
+-        "zls-aarch64-windows.zip",
+-        "zls-x86-linux.tar.xz",
+-        "zls-x86-windows.zip",
+-      ]
++      const supportedCombos = ["zls-x86_64-linux.tar.xz", "zls-aarch64-linux.tar.xz", "zls-x86-linux.tar.xz"]
+ 
+       if (!supportedCombos.includes(assetName)) {
+         return
+@@ -652,28 +631,17 @@ export const Zls: Info = {
+       const tempPath = path.join(Global.Path.bin, assetName)
+       if (downloadResponse.body) await Filesystem.writeStream(tempPath, downloadResponse.body)
+ 
+-      if (ext === "zip") {
+-        const ok = await Archive.extractZip(tempPath, Global.Path.bin)
+-          .then(() => true)
+-          .catch((error) => {
+-            return false
+-          })
+-        if (!ok) return
+-      } else {
+-        await run(["tar", "-xf", tempPath], { cwd: Global.Path.bin })
+-      }
++      await run(["tar", "-xf", tempPath], { cwd: Global.Path.bin })
+ 
+       await fs.rm(tempPath, { force: true })
+ 
+-      bin = path.join(Global.Path.bin, "zls" + (platform === "win32" ? ".exe" : ""))
++      bin = path.join(Global.Path.bin, "zls")
+ 
+       if (!(await Filesystem.exists(bin))) {
+         return
+       }
+ 
+-      if (platform !== "win32") {
+-        await fs.chmod(bin, 0o755).catch(() => {})
+-      }
++      await fs.chmod(bin, 0o755).catch(() => {})
+     }
+ 
+     return {
+@@ -779,7 +747,7 @@ async function roslynLanguageServerGlobalPath() {
+     process.env.DOTNET_CLI_HOME ?? os.homedir(),
+     ".dotnet",
+     "tools",
+-    "roslyn-language-server" + (process.platform === "win32" ? ".cmd" : ""),
++    "roslyn-language-server",
+   )
+   return (await pathExists(bin)) ? bin : undefined
+ }
+@@ -842,7 +810,7 @@ export const FSharp: Info = {
+         return
+       }
+ 
+-      bin = path.join(Global.Path.bin, "fsautocomplete" + (process.platform === "win32" ? ".exe" : ""))
++      bin = path.join(Global.Path.bin, "fsautocomplete")
+     }
+ 
+     return {
+@@ -947,8 +915,7 @@ export const Clangd: Info = {
+       }
+     }
+ 
+-    const ext = process.platform === "win32" ? ".exe" : ""
+-    const direct = path.join(Global.Path.bin, "clangd" + ext)
++    const direct = path.join(Global.Path.bin, "clangd")
+     if (await Filesystem.exists(direct)) {
+       return {
+         process: spawn(direct, args, {
+@@ -988,12 +955,7 @@ export const Clangd: Info = {
+       return
+     }
+     const platform = process.platform
+-    const tokens: Record<string, string> = {
+-      darwin: "mac",
+-      linux: "linux",
+-      win32: "windows",
+-    }
+-    const token = tokens[platform]
++    const token = platform === "linux" ? "linux" : undefined
+     if (!token) {
+       return
+     }
+@@ -1046,14 +1008,12 @@ export const Clangd: Info = {
+     }
+     await fs.rm(archive, { force: true })
+ 
+-    const bin = path.join(Global.Path.bin, "clangd_" + tag, "bin", "clangd" + ext)
++    const bin = path.join(Global.Path.bin, "clangd_" + tag, "bin", "clangd")
+     if (!(await Filesystem.exists(bin))) {
+       return
+     }
+ 
+-    if (platform !== "win32") {
+-      await fs.chmod(bin, 0o755).catch(() => {})
+-    }
++    await fs.chmod(bin, 0o755).catch(() => {})
+ 
+     await fs.unlink(path.join(Global.Path.bin, "clangd")).catch(() => {})
+     await fs.symlink(bin, path.join(Global.Path.bin, "clangd")).catch(() => {})
+@@ -1228,21 +1188,7 @@ export const JDTLS: Info = {
+     if (!(await pathExists(launcherJar))) {
+       return
+     }
+-    const configFile = path.join(
+-      distPath,
+-      (() => {
+-        switch (process.platform) {
+-          case "darwin":
+-            return "config_mac"
+-          case "linux":
+-            return "config_linux"
+-          case "win32":
+-            return "config_win"
+-          default:
+-            return "config_linux"
+-        }
+-      })(),
+-    )
++    const configFile = path.join(distPath, "config_linux")
+     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-jdtls-data"))
+     return {
+       process: spawn(
+@@ -1289,7 +1235,7 @@ export const KotlinLS: Info = {
+   async spawn(root, _ctx, flags) {
+     const distPath = path.join(Global.Path.bin, "kotlin-ls")
+     const launcherScript =
+-      process.platform === "win32" ? path.join(distPath, "kotlin-lsp.cmd") : path.join(distPath, "kotlin-lsp.sh")
++      path.join(distPath, "kotlin-lsp.sh")
+     const installed = await Filesystem.exists(launcherScript)
+     if (!installed) {
+       if (flags.disableLspDownload) return
+@@ -1313,12 +1259,9 @@ export const KotlinLS: Info = {
+       if (arch === "arm64") kotlinArch = "aarch64"
+       else if (arch === "x64") kotlinArch = "x64"
+ 
+-      let kotlinPlatform: string = platform
+-      if (platform === "darwin") kotlinPlatform = "mac"
+-      else if (platform === "linux") kotlinPlatform = "linux"
+-      else if (platform === "win32") kotlinPlatform = "win"
++      const kotlinPlatform: string = platform
+ 
+-      const supportedCombos = ["mac-x64", "mac-aarch64", "linux-x64", "linux-aarch64", "win-x64", "win-aarch64"]
++      const supportedCombos = ["linux-x64", "linux-aarch64"]
+ 
+       const combo = `${kotlinPlatform}-${kotlinArch}`
+ 
+@@ -1343,9 +1286,7 @@ export const KotlinLS: Info = {
+         })
+       if (!ok) return
+       await fs.rm(archivePath, { force: true })
+-      if (process.platform !== "win32") {
+-        await fs.chmod(launcherScript, 0o755).catch(() => {})
+-      }
++      await fs.chmod(launcherScript, 0o755).catch(() => {})
+     }
+     if (!(await Filesystem.exists(launcherScript))) {
+       return
+@@ -1418,23 +1359,13 @@ export const LuaLS: Info = {
+       else if (arch === "x64") lualsArch = "x64"
+       else if (arch === "ia32") lualsArch = "ia32"
+ 
+-      let lualsPlatform: string = platform
+-      if (platform === "darwin") lualsPlatform = "darwin"
+-      else if (platform === "linux") lualsPlatform = "linux"
+-      else if (platform === "win32") lualsPlatform = "win32"
++      const lualsPlatform: string = platform
+ 
+-      const ext = platform === "win32" ? "zip" : "tar.gz"
++      const ext = "tar.gz"
+ 
+       assetName = `lua-language-server-${release.tag_name}-${lualsPlatform}-${lualsArch}.${ext}`
+ 
+-      const supportedCombos = [
+-        "darwin-arm64.tar.gz",
+-        "darwin-x64.tar.gz",
+-        "linux-x64.tar.gz",
+-        "linux-arm64.tar.gz",
+-        "win32-x64.zip",
+-        "win32-ia32.zip",
+-      ]
++      const supportedCombos = ["linux-x64.tar.gz", "linux-arm64.tar.gz"]
+ 
+       const assetSuffix = `${lualsPlatform}-${lualsArch}.${ext}`
+       if (!supportedCombos.includes(assetSuffix)) {
+@@ -1468,40 +1399,29 @@ export const LuaLS: Info = {
+ 
+       await fs.mkdir(installDir, { recursive: true })
+ 
+-      if (ext === "zip") {
+-        const ok = await Archive.extractZip(tempPath, installDir)
+-          .then(() => true)
+-          .catch((error) => {
+-            return false
+-          })
+-        if (!ok) return
+-      } else {
+-        const ok = await run(["tar", "-xzf", tempPath, "-C", installDir])
+-          .then((result) => result.code === 0)
+-          .catch((error: unknown) => {
+-            return false
+-          })
+-        if (!ok) return
+-      }
++      const ok = await run(["tar", "-xzf", tempPath, "-C", installDir])
++        .then((result) => result.code === 0)
++        .catch((error: unknown) => {
++          return false
++        })
++      if (!ok) return
+ 
+       await fs.rm(tempPath, { force: true })
+ 
+       // Binary is located in bin/ subdirectory within the extracted archive
+-      bin = path.join(installDir, "bin", "lua-language-server" + (platform === "win32" ? ".exe" : ""))
++      bin = path.join(installDir, "bin", "lua-language-server")
+ 
+       if (!(await Filesystem.exists(bin))) {
+         return
+       }
+ 
+-      if (platform !== "win32") {
+-        const ok = await fs
+-          .chmod(bin, 0o755)
+-          .then(() => true)
+-          .catch((error: unknown) => {
+-            return false
+-          })
+-        if (!ok) return
+-      }
++      const ok = await fs
++        .chmod(bin, 0o755)
++        .then(() => true)
++        .catch((error: unknown) => {
++          return false
++        })
++      if (!ok) return
+     }
+ 
+     return {
+@@ -1643,7 +1563,7 @@ export const TerraformLS: Info = {
+       const arch = process.arch
+ 
+       const tfArch = arch === "arm64" ? "arm64" : "amd64"
+-      const tfPlatform = platform === "win32" ? "windows" : platform
++      const tfPlatform = platform
+ 
+       const builds = release.builds ?? []
+       const build = builds.find((b) => b.arch === tfArch && b.os === tfPlatform)
+@@ -1667,15 +1587,13 @@ export const TerraformLS: Info = {
+       if (!ok) return
+       await fs.rm(tempPath, { force: true })
+ 
+-      bin = path.join(Global.Path.bin, "terraform-ls" + (platform === "win32" ? ".exe" : ""))
++      bin = path.join(Global.Path.bin, "terraform-ls")
+ 
+       if (!(await Filesystem.exists(bin))) {
+         return
+       }
+ 
+-      if (platform !== "win32") {
+-        await fs.chmod(bin, 0o755).catch(() => {})
+-      }
++      await fs.chmod(bin, 0o755).catch(() => {})
+     }
+ 
+     return {
+@@ -1720,8 +1638,8 @@ export const TexLab: Info = {
+       const arch = process.arch
+ 
+       const texArch = arch === "arm64" ? "aarch64" : "x86_64"
+-      const texPlatform = platform === "darwin" ? "macos" : platform === "win32" ? "windows" : "linux"
+-      const ext = platform === "win32" ? "zip" : "tar.gz"
++      const texPlatform = "linux"
++      const ext = "tar.gz"
+       const assetName = `texlab-${texArch}-${texPlatform}.${ext}`
+ 
+       const assets = release.assets ?? []
+@@ -1738,29 +1656,17 @@ export const TexLab: Info = {
+       const tempPath = path.join(Global.Path.bin, assetName)
+       if (downloadResponse.body) await Filesystem.writeStream(tempPath, downloadResponse.body)
+ 
+-      if (ext === "zip") {
+-        const ok = await Archive.extractZip(tempPath, Global.Path.bin)
+-          .then(() => true)
+-          .catch((error) => {
+-            return false
+-          })
+-        if (!ok) return
+-      }
+-      if (ext === "tar.gz") {
+-        await run(["tar", "-xzf", tempPath], { cwd: Global.Path.bin })
+-      }
++      await run(["tar", "-xzf", tempPath], { cwd: Global.Path.bin })
+ 
+       await fs.rm(tempPath, { force: true })
+ 
+-      bin = path.join(Global.Path.bin, "texlab" + (platform === "win32" ? ".exe" : ""))
++      bin = path.join(Global.Path.bin, "texlab")
+ 
+       if (!(await Filesystem.exists(bin))) {
+         return
+       }
+ 
+-      if (platform !== "win32") {
+-        await fs.chmod(bin, 0o755).catch(() => {})
+-      }
++      await fs.chmod(bin, 0o755).catch(() => {})
+     }
+ 
+     return {
+@@ -1819,10 +1725,7 @@ export const Clojure: Info = {
+   extensions: [".clj", ".cljs", ".cljc", ".edn"],
+   root: NearestRoot(["deps.edn", "project.clj", "shadow-cljs.edn", "bb.edn", "build.boot"]),
+   async spawn(root) {
+-    let bin = which("clojure-lsp")
+-    if (!bin && process.platform === "win32") {
+-      bin = which("clojure-lsp.exe")
+-    }
++    const bin = which("clojure-lsp")
+     if (!bin) {
+       return
+     }
+@@ -1891,16 +1794,8 @@ export const Tinymist: Info = {
+       let tinymistPlatform: string
+       let ext: string
+ 
+-      if (platform === "darwin") {
+-        tinymistPlatform = "apple-darwin"
+-        ext = "tar.gz"
+-      } else if (platform === "win32") {
+-        tinymistPlatform = "pc-windows-msvc"
+-        ext = "zip"
+-      } else {
+-        tinymistPlatform = "unknown-linux-gnu"
+-        ext = "tar.gz"
+-      }
++      tinymistPlatform = "unknown-linux-gnu"
++      ext = "tar.gz"
+ 
+       const assetName = `tinymist-${tinymistArch}-${tinymistPlatform}.${ext}`
+ 
+@@ -1931,15 +1826,13 @@ export const Tinymist: Info = {
+ 
+       await fs.rm(tempPath, { force: true })
+ 
+-      bin = path.join(Global.Path.bin, "tinymist" + (platform === "win32" ? ".exe" : ""))
++      bin = path.join(Global.Path.bin, "tinymist")
+ 
+       if (!(await Filesystem.exists(bin))) {
+         return
+       }
+ 
+-      if (platform !== "win32") {
+-        await fs.chmod(bin, 0o755).catch(() => {})
+-      }
++      await fs.chmod(bin, 0o755).catch(() => {})
+     }
+ 
+     return {
+diff --git a/packages/opencode/src/lsp/server.ts b/packages/opencode/src/lsp/server.ts
+index f078697..f6cb6d5 100644
+--- a/packages/opencode/src/lsp/server.ts
++++ b/packages/opencode/src/lsp/server.ts
+@@ -928,7 +928,7 @@ export const Clangd: Info = {
+     for (const entry of entries) {
+       if (!entry.isDirectory()) continue
+       if (!entry.name.startsWith("clangd_")) continue
+-      const candidate = path.join(Global.Path.bin, entry.name, "bin", "clangd" + ext)
++      const candidate = path.join(Global.Path.bin, entry.name, "bin", "clangd")
+       if (await Filesystem.exists(candidate)) {
+         return {
+           process: spawn(candidate, args, {
+@@ -1415,13 +1415,13 @@ export const LuaLS: Info = {
+         return
+       }
+ 
+-      const ok = await fs
++      const chmodOk = await fs
+         .chmod(bin, 0o755)
+         .then(() => true)
+         .catch((error: unknown) => {
+           return false
+         })
+-      if (!ok) return
++      if (!chmodOk) return
+     }
+ 
+     return {
