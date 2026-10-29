@@ -28,5 +28,12 @@ in `overlay/`; the rules for both halves are defined in
 
 ## Current State
 
-The patch stack is empty. Openick currently ships the pinned upstream release
-with no patch modifications.
+The patch stack carries the Android ARM64 delta defined in
+`docs/plan/0002-android-arm64-build.md`:
+
+- `0001-build-android-target.patch` adds an opt-in `--android` mode to the
+  upstream build script (`packages/opencode/script/build.ts`). Without the
+  flag the script behaves exactly as upstream.
+- `0002-register-opentui-core-android.patch` registers the OpenTUI core
+  dependency patch in the upstream `patchedDependencies` map
+  (`package.json`).
