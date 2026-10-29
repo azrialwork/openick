@@ -242,7 +242,7 @@ if ! grep -q 'patch.crates-io' "${BUN_PTY_DIR}/rust-pty/Cargo.toml"; then
   {
     echo ""
     echo "[patch.crates-io]"
-    echo "termios = { path = \"../termios-${TERMIOS_VERSION}\" }"
+    echo "termios = { path = \"../../termios-${TERMIOS_VERSION}\" }"
   } >> "${BUN_PTY_DIR}/rust-pty/Cargo.toml"
 fi
 
