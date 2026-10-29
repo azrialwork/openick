@@ -37,3 +37,16 @@ The patch stack carries the Android ARM64 delta defined in
 - `0002-register-opentui-core-android.patch` registers the OpenTUI core
   dependency patch in the upstream `patchedDependencies` map
   (`package.json`).
+
+The stack also carries the platform pruning defined in
+`docs/plan/0003-linux-android-bash-only.md`:
+
+- `0003-build-targets-linux-only.patch` restricts the upstream build
+  script to the Linux target family.
+- `0004-shell-bash-only.patch` reduces the shell layer to Bash only.
+- `0005-delete-tui-windows-terminal.patch` deletes the TUI's Windows
+  terminal module and its call sites.
+- `0006-platform-tables-linux-only.patch` trims the LSP and ripgrep
+  platform tables to their Linux entries.
+- `0007-remaining-platform-branches.patch` deletes every remaining
+  Windows and macOS branch in the bundled source trees.
