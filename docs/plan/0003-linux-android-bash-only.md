@@ -218,20 +218,21 @@ run definition, following the Plan 0002 staging protocol.
 | 2026-10-29 | Plan created. |
 | 2026-10-29 | Scope correction recorded during implementation: Section 4.2 left upstream tests untouched, but two test files reference the deleted surface and fail typecheck otherwise. Tests that reference a deleted API are therefore updated inside the same patch that deletes the API: the core and opencode shell tests in patch `0004`, and the managed-plist tests in patch `0007`. No other test changes are in scope. |
 | 2026-10-29 | Section 5.3 correction recorded during implementation: a third import site of `terminal-win32` exists in `packages/opencode/src/cli/cmd/tui.ts` (the Ctrl-C guard). It is deleted by patch `0007`, which owns that file's remaining changes; patch `0005` keeps the module deletion and the `app.tsx` sites. |
+| 2026-10-29 | Plan completed. All five gates pass: the inventory search returns no hits on the materialized tree; typecheck is clean for `packages/core`, `packages/tui`, and `packages/opencode`; `validate` is green on `main` (run `40860351650`); the release was republished with `force=true` (run `40862708334`) and the Android asset followed (run `40874339762`), giving exactly the ten assets of Locked Decision 7; fresh downloads of the Linux x64 and Android assets verify against the published `SHA256SUMS`, and the Linux x64 binary reports `1.19.5`. Per Section 9, the on-device gate ran on the staged artifact of the same workflow definition (run `40860665370`) before republication: version, mock round trip, a Bash tool invocation executed by the device shell, server health and session, web UI 200, and TUI rendering all pass, and the device restore diff is identical. The staged artifact reached the device through the user's Google Drive after the Tailscale tunnel proved too unstable for the 71 MB transfer; the Drive copy was unshared and trashed after use. Net source effect of the five patches: 46 files, +163/−1,194 lines; the Linux x64 binary is 213,354,672 bytes against the pre-pruning 214,329,520 (about 0.45 percent), as forecast in Section 3. |
 
 ## 11. Acceptance Criteria
 
-- [ ] Patches `0003`–`0007` exist, carry the standard patch headers, and are
+- [x] Patches `0003`–`0007` exist, carry the standard patch headers, and are
   listed in `patches/README.md`.
-- [ ] The materialized tree passes the Section 8 inventory check (gate 1).
-- [ ] Typecheck passes for the affected packages (gate 2).
-- [ ] The `validate` workflow is green on `main` with the full delta (gate 3).
-- [ ] `scripts/package-release.sh` packages Linux archives only, and
+- [x] The materialized tree passes the Section 8 inventory check (gate 1).
+- [x] Typecheck passes for the affected packages (gate 2).
+- [x] The `validate` workflow is green on `main` with the full delta (gate 3).
+- [x] `scripts/package-release.sh` packages Linux archives only, and
   `release.yml` carries the `force` input with default `false`.
-- [ ] The `v1.19.5` release is republished with exactly the ten assets of
+- [x] The `v1.19.5` release is republished with exactly the ten assets of
   Locked Decision 7 and no darwin or windows asset (gate 5).
-- [ ] The republished Linux x64 binary runs and reports version `1.19.5`.
-- [ ] The republished Android asset passes the on-device gate, including the
+- [x] The republished Linux x64 binary runs and reports version `1.19.5`.
+- [x] The republished Android asset passes the on-device gate, including the
   Bash shell check and the TUI rendering check, and the device restore diff
   is identical (gate 4).
-- [ ] `README.md` describes the Linux-and-Android-only, Bash-only build.
+- [x] `README.md` describes the Linux-and-Android-only, Bash-only build.
