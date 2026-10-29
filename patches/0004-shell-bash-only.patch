@@ -1,0 +1,969 @@
+Purpose: Make Bash the only shell (Plan 0003, Locked Decision 3). The core shell module keeps only its Bash registry entry: resolution returns Bash for every request (a requested name is honored only when it names a Bash executable), the Windows candidate chain, the Git Bash lookup, the macOS default, and the per-shell argument builders for fish, zsh, dash, ksh, sh, nu, cmd, PowerShell, and pwsh are deleted, as is the taskkill branch of killTree. The shell tool loses its PowerShell machinery (the tree-sitter PowerShell parser, the ps scan path, cygpath translation, and the cmd/PowerShell prompt sections and shell kinds), the core bash tool resolves its default shell through the shell module, and the PTY loses its Windows environment block. The two shell test files are updated to assert the Bash-only contract, including removal of the tests for the deleted Git Bash surface.
+Upstream files: packages/core/src/shell.ts, packages/core/src/tool/bash.ts, packages/core/src/pty.ts, packages/opencode/src/tool/shell.ts, packages/opencode/src/tool/shell/id.ts, packages/opencode/src/tool/shell/prompt.ts, packages/core/test/shell.test.ts, packages/opencode/test/tool/shell.test.ts
+Rebase note: Check the shell module's export surface first (preferred, acceptable, args, list, name, login, posix, killTree); callers across the tree depend on exactly those names. The prompt file is regenerated from the shell.txt template placeholders, which are unchanged.
+
+diff --git a/packages/core/src/pty.ts b/packages/core/src/pty.ts
+index e5be4d4..a202631 100644
+--- a/packages/core/src/pty.ts
++++ b/packages/core/src/pty.ts
+@@ -173,11 +173,6 @@ const layer = Layer.effect(
+         TERM: "xterm-256color",
+         OPENCODE_TERMINAL: "1",
+       } as Record<string, string>
+-      if (process.platform === "win32") {
+-        env.LC_ALL = "C.UTF-8"
+-        env.LC_CTYPE = "C.UTF-8"
+-        env.LANG = "C.UTF-8"
+-      }
+       yield* Effect.logInfo("creating session", { id, cmd: command, args, cwd })
+       const { spawn } = yield* Effect.promise(() => pty())
+       const proc = yield* Effect.sync(() => spawn(command, args, { name: "xterm-256color", cwd, env }))
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
+index 2908910..20b8911 100644
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -1,26 +1,12 @@
+ export * as Shell from "./shell"
+ 
+ import path from "path"
+-import { spawn, type ChildProcess } from "child_process"
+-import { readFile } from "fs/promises"
++import { type ChildProcess } from "child_process"
+ import { statSync } from "fs"
+ import { setTimeout as sleep } from "node:timers/promises"
+-import { Flag } from "./flag/flag"
+-import { FSUtil } from "./fs-util"
+ import { which } from "./util/which"
+ 
+ const SIGKILL_TIMEOUT_MS = 200
+-const META: Record<string, { deny?: boolean; login?: boolean; posix?: boolean; ps?: boolean }> = {
+-  bash: { login: true, posix: true },
+-  dash: { login: true, posix: true },
+-  fish: { deny: true, login: true },
+-  ksh: { login: true, posix: true },
+-  nu: { deny: true },
+-  powershell: { ps: true },
+-  pwsh: { ps: true },
+-  sh: { login: true, posix: true },
+-  zsh: { login: true, posix: true },
+-}
+ 
+ export type Item = {
+   path: string
+@@ -32,18 +18,6 @@ export async function killTree(proc: ChildProcess, opts?: { exited?: () => boole
+   const pid = proc.pid
+   if (!pid || opts?.exited?.()) return
+ 
+-  if (process.platform === "win32") {
+-    await new Promise<void>((resolve) => {
+-      const killer = spawn("taskkill", ["/pid", String(pid), "/f", "/t"], {
+-        stdio: "ignore",
+-        windowsHide: true,
+-      })
+-      killer.once("exit", () => resolve())
+-      killer.once("error", () => resolve())
+-    })
+-    return
+-  }
+-
+   try {
+     process.kill(-pid, "SIGTERM")
+     await sleep(SIGKILL_TIMEOUT_MS)
+@@ -63,140 +37,57 @@ function stat(file: string) {
+   return statSync(file, { throwIfNoEntry: false }) ?? undefined
+ }
+ 
+-function full(file: string) {
+-  if (process.platform !== "win32") return file
+-  const shell = FSUtil.windowsPath(file)
+-  if (path.win32.dirname(shell) !== ".") {
+-    if (shell.startsWith("/") && name(shell) === "bash") return gitbash() || shell
+-    return shell
+-  }
+-  if (name(shell) === "bash") return gitbash() || which(shell) || shell
+-  return which(shell) || shell
+-}
+-
+-function meta(file: string) {
+-  return META[name(file)]
+-}
+-
+-function ok(file: string) {
+-  return meta(file)?.deny !== true
+-}
+-
+-function rooted(file: string) {
+-  return path.isAbsolute(FSUtil.windowsPath(file))
+-}
+-
+ function resolve(file: string) {
+-  const shell = full(file)
+-  if (rooted(shell)) {
+-    if (stat(shell)?.isFile()) return shell
++  if (path.isAbsolute(file)) {
++    if (stat(file)?.isFile()) return file
+     return
+   }
+-  return which(shell) ?? undefined
+-}
+-
+-function win() {
+-  return Array.from(
+-    new Set(
+-      [which("pwsh"), which("powershell"), gitbash(), process.env.COMSPEC || "cmd.exe"]
+-        .filter((item): item is string => Boolean(item))
+-        .map(full),
+-    ),
+-  )
++  return which(file) ?? undefined
+ }
+ 
+-async function unix() {
+-  const text = await readFile("/etc/shells", "utf8").catch(() => "")
+-  if (text) return Array.from(new Set(text.split("\n").filter((line) => line.trim() && !line.startsWith("#"))))
+-  return ["/bin/bash", "/bin/zsh", "/bin/sh"]
+-}
+-
+-function select(file: string | undefined, opts?: { acceptable?: boolean }) {
+-  if (file && (!opts?.acceptable || ok(file))) {
++// Bash is the only shell. A requested shell is honored only when it names a
++// Bash executable; every other name resolves to Bash.
++function select(file: string | undefined) {
++  if (file && name(file) === "bash") {
+     const shell = resolve(file)
+     if (shell) return shell
+   }
+-  if (process.platform === "win32") return win()[0]
+-  return fallback()
+-}
+-
+-export function gitbash() {
+-  if (process.platform !== "win32") return
+-  if (Flag.OPENCODE_GIT_BASH_PATH) return Flag.OPENCODE_GIT_BASH_PATH
+-  const git = which("git")
+-  if (!git) return
+-  const file = path.join(git, "..", "..", "bin", "bash.exe")
+-  if (stat(file)?.size) return file
+-}
+-
+-function fallback() {
+-  if (process.platform === "darwin") return "/bin/zsh"
+-  const bash = which("bash")
+-  if (bash) return bash
+-  return "/bin/sh"
++  return which("bash") ?? "/bin/bash"
+ }
+ 
+ export function name(file: string) {
+-  if (process.platform === "win32") return path.win32.parse(FSUtil.windowsPath(file)).name.toLowerCase()
+   return path.basename(file).toLowerCase()
+ }
+ 
+ export function login(file: string) {
+-  return meta(file)?.login === true
++  return name(file) === "bash"
+ }
+ 
+ export function posix(file: string) {
+-  return meta(file)?.posix === true
+-}
+-
+-export function ps(file: string) {
+-  return meta(file)?.ps === true
++  return name(file) === "bash"
+ }
+ 
+ function info(file: string): Item {
+-  const item = full(file)
+-  const n = name(item)
+   return {
+-    path: item,
+-    name: resolve(n) ? n : item,
+-    acceptable: ok(item),
++    path: file,
++    name: "bash",
++    acceptable: true,
+   }
+ }
+ 
+ export function args(file: string, command: string, cwd: string) {
+-  const n = name(file)
+-  if (n === "nu" || n === "fish") return ["-c", command]
+-  if (n === "zsh") {
+-    return [
+-      "-l",
+-      "-c",
+-      `
+-        [[ -f ~/.zshenv ]] && source ~/.zshenv >/dev/null 2>&1 || true
+-        [[ -f "\${ZDOTDIR:-$HOME}/.zshrc" ]] && source "\${ZDOTDIR:-$HOME}/.zshrc" >/dev/null 2>&1 || true
+-        cd -- "$1"
+-        eval ${JSON.stringify(command)}
+-      `,
+-      "opencode",
+-      cwd,
+-    ]
+-  }
+-  if (n === "bash") {
+-    return [
+-      "-l",
+-      "-c",
+-      `
++  return [
++    "-l",
++    "-c",
++    `
+         shopt -s expand_aliases
+         [[ -f ~/.bashrc ]] && source ~/.bashrc >/dev/null 2>&1 || true
+         cd -- "$1"
+         eval ${JSON.stringify(command)}
+       `,
+-      "opencode",
+-      cwd,
+-    ]
+-  }
+-  if (n === "cmd") return ["/c", command]
+-  if (ps(file)) return ["-NoProfile", "-Command", command]
+-  return ["-c", command]
++    "opencode",
++    cwd,
++  ]
+ }
+ 
+ let defaultPreferred: string | undefined
+@@ -212,8 +103,8 @@ preferred.reset = () => {
+ }
+ 
+ export function acceptable(configShell?: string) {
+-  if (configShell) return select(configShell, { acceptable: true })
+-  defaultAcceptable ??= select(process.env.SHELL, { acceptable: true })
++  if (configShell) return select(configShell)
++  defaultAcceptable ??= select(process.env.SHELL)
+   return defaultAcceptable
+ }
+ acceptable.reset = () => {
+@@ -221,6 +112,6 @@ acceptable.reset = () => {
+ }
+ 
+ export async function list(): Promise<Item[]> {
+-  const shells = process.platform === "win32" ? win() : await unix()
+-  return shells.filter((s) => resolve(s)).map(info)
++  const shell = resolve("bash")
++  return shell ? [info(shell)] : []
+ }
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+index 2242376..a71a178 100644
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -11,6 +11,7 @@ import { LocationMutation } from "../location-mutation"
+ import { AppProcess } from "../process"
+ import { PermissionV2 } from "../permission"
+ import { PositiveInt } from "../schema"
++import { Shell } from "../shell"
+ import { ToolRegistry } from "./registry"
+ import { Tool } from "./tool"
+ import { Tools } from "./tools"
+@@ -46,7 +47,7 @@ const Output = Schema.Struct({
+ 
+ type Output = typeof Output.Type
+ 
+-const defaultShell = () => (process.platform === "win32" ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/sh")
++const defaultShell = () => Shell.preferred()
+ 
+ const modelOutput = (output: Output) => {
+   const warnings = output.warnings?.length
+@@ -63,10 +64,9 @@ const isTimeout = (error: AppProcess.AppProcessError) =>
+  * Minimal V2 core shell boundary. Keep parity debt visible without pulling the
+  * legacy shell runtime into core.
+  */
+-// TODO: Port tree-sitter bash / PowerShell parser-based approval reduction.
++// TODO: Port tree-sitter bash parser-based approval reduction.
+ // TODO: Port BashArity reusable command-prefix approvals.
+ // TODO: Replace token-based command-argument external-directory advisories with parser-based detection.
+-// TODO: Restore PowerShell and cmd-specific invocation/path handling on Windows.
+ // TODO: Add plugin shell.env environment augmentation once V2 plugin hooks exist.
+ // TODO: Add durable/live progress metadata streaming for long-running commands once V2 tool invocation progress context is wired.
+ // TODO: Persist background job status and define restart recovery before exposing remote observation.
+@@ -106,7 +106,7 @@ const layer = Layer.effectDiscard(
+     yield* tools
+       .register({
+         [name]: Tool.make({
+-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows.`,
++          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Commands run in Bash.`,
+           input: Input,
+           output: Output,
+           structured: StructuredOutput,
+@@ -159,7 +159,7 @@ const layer = Layer.effectDiscard(
+                 cwd: target.canonical,
+                 shell,
+                 stdin: "ignore",
+-                detached: process.platform !== "win32",
++                detached: true,
+                 forceKillAfter: Duration.seconds(3),
+               })
+               const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index 1e4423e..99ec347 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -25,7 +25,7 @@ import { BashArity } from "@/permission/arity"
+ export { Parameters } from "./shell/prompt"
+ 
+ const MAX_METADATA_LENGTH = 30_000
+-const CWD = new Set(["cd", "chdir", "popd", "pushd", "push-location", "set-location"])
++const CWD = new Set(["cd", "chdir", "popd", "pushd"])
+ const FILES = new Set([
+   ...CWD,
+   "rm",
+@@ -36,34 +36,7 @@ const FILES = new Set([
+   "chmod",
+   "chown",
+   "cat",
+-  // Leave PowerShell aliases out for now. Common ones like cat/cp/mv/rm/mkdir
+-  // already hit the entries above, and alias normalization should happen in one
+-  // place later so we do not risk double-prompting.
+-  "get-content",
+-  "set-content",
+-  "add-content",
+-  "copy-item",
+-  "move-item",
+-  "remove-item",
+-  "new-item",
+-  "rename-item",
+ ])
+-const CMD_FILES = new Set([
+-  "copy",
+-  "del",
+-  "dir",
+-  "erase",
+-  "md",
+-  "mkdir",
+-  "move",
+-  "rd",
+-  "ren",
+-  "rename",
+-  "rmdir",
+-  "type",
+-])
+-const FLAGS = new Set(["-destination", "-literalpath", "-path"])
+-const SWITCHES = new Set(["-confirm", "-debug", "-force", "-nonewline", "-recurse", "-verbose", "-whatif"])
+ 
+ type Part = {
+   type: string
+@@ -93,17 +66,8 @@ function parts(node: Node) {
+   for (let i = 0; i < node.childCount; i++) {
+     const child = node.child(i)
+     if (!child) continue
+-    if (child.type === "command_elements") {
+-      for (let j = 0; j < child.childCount; j++) {
+-        const item = child.child(j)
+-        if (!item || item.type === "command_argument_sep" || item.type === "redirection") continue
+-        out.push({ type: item.type, text: item.text })
+-      }
+-      continue
+-    }
+     if (
+       child.type !== "command_name" &&
+-      child.type !== "command_name_expr" &&
+       child.type !== "word" &&
+       child.type !== "string" &&
+       child.type !== "raw_string" &&
+@@ -134,47 +98,13 @@ function unquote(text: string) {
+ 
+ function home(text: string) {
+   if (text === "~") return os.homedir()
+-  if (text.startsWith("~/") || text.startsWith("~\\")) return path.join(os.homedir(), text.slice(2))
++  if (text.startsWith("~/")) return path.join(os.homedir(), text.slice(2))
+   return text
+ }
+ 
+-function envValue(key: string) {
+-  if (process.platform !== "win32") return process.env[key]
+-  const name = Object.keys(process.env).find((item) => item.toLowerCase() === key.toLowerCase())
+-  return name ? process.env[name] : undefined
+-}
+-
+-function auto(key: string, cwd: string, shell: string) {
+-  const name = key.toUpperCase()
+-  if (name === "HOME") return os.homedir()
+-  if (name === "PWD") return cwd
+-  if (name === "PSHOME") return path.dirname(shell)
+-}
+-
+-function expand(text: string, cwd: string, shell: string) {
+-  const out = unquote(text)
+-    .replace(/\$\{env:([^}]+)\}/gi, (_, key: string) => envValue(key) || "")
+-    .replace(/\$env:([A-Za-z_][A-Za-z0-9_]*)/gi, (_, key: string) => envValue(key) || "")
+-    .replace(/\$(HOME|PWD|PSHOME)(?=$|[\\/])/gi, (_, key: string) => auto(key, cwd, shell) || "")
+-  return home(out)
+-}
+-
+-function provider(text: string) {
+-  const match = text.match(/^([A-Za-z]+)::(.*)$/)
+-  if (match) {
+-    if (match[1].toLowerCase() !== "filesystem") return
+-    return match[2]
+-  }
+-  const prefix = text.match(/^([A-Za-z]+):(.*)$/)
+-  if (!prefix) return text
+-  if (prefix[1].length === 1) return text
+-  return
+-}
+-
+-function dynamic(text: string, ps: boolean) {
++function dynamic(text: string) {
+   if (text.startsWith("(") || text.startsWith("@(")) return true
+   if (text.includes("$(") || text.includes("${") || text.includes("`")) return true
+-  if (ps) return /\$(?!env:)/i.test(text)
+   return text.includes("$")
+ }
+ 
+@@ -185,36 +115,14 @@ function prefix(text: string) {
+   return text.slice(0, match.index)
+ }
+ 
+-function pathArgs(list: Part[], ps: boolean, cmd = false) {
+-  if (!ps) {
+-    return list
+-      .slice(1)
+-      .filter(
+-        (item) =>
+-          !item.text.startsWith("-") &&
+-          !(cmd && item.text.startsWith("/")) &&
+-          !(list[0]?.text === "chmod" && item.text.startsWith("+")),
+-      )
+-      .map((item) => item.text)
+-  }
+-
+-  const out: string[] = []
+-  let want = false
+-  for (const item of list.slice(1)) {
+-    if (want) {
+-      out.push(item.text)
+-      want = false
+-      continue
+-    }
+-    if (item.type === "command_parameter") {
+-      const flag = item.text.toLowerCase()
+-      if (SWITCHES.has(flag)) continue
+-      want = FLAGS.has(flag)
+-      continue
+-    }
+-    out.push(item.text)
+-  }
+-  return out
++function pathArgs(list: Part[]) {
++  return list
++    .slice(1)
++    .filter(
++      (item) =>
++        !item.text.startsWith("-") && !(list[0]?.text === "chmod" && item.text.startsWith("+")),
++    )
++    .map((item) => item.text)
+ }
+ 
+ function preview(text: string) {
+@@ -254,8 +162,8 @@ function tail(text: string, maxLines: number, maxBytes: number) {
+   }
+ }
+ 
+-const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boolean) {
+-  const tree = yield* Effect.promise(() => parser().then((p) => (ps ? p.ps : p.bash).parse(command)))
++const parse = Effect.fn("ShellTool.parse")(function* (command: string) {
++  const tree = yield* Effect.promise(() => parser().then((p) => p.bash.parse(command)))
+   if (!tree) throw new Error("Failed to parse command")
+   return tree
+ })
+@@ -263,10 +171,7 @@ const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boole
+ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string }) {
+   if (scan.dirs.size > 0) {
+     const directories = Array.from(scan.dirs)
+-    const globs = directories.map((dir) => {
+-      if (process.platform === "win32") return FSUtil.normalizePathPattern(path.join(dir, "*"))
+-      return path.join(dir, "*")
+-    })
++    const globs = directories.map((dir) => path.join(dir, "*"))
+     yield* ctx.ask({
+       permission: "external_directory",
+       patterns: globs,
+@@ -291,21 +196,12 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
+ })
+ 
+ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
+-  if (process.platform === "win32" && Shell.ps(shell)) {
+-    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
+-      cwd,
+-      env,
+-      stdin: "ignore",
+-      detached: false,
+-    })
+-  }
+-
+   return ChildProcess.make(command, [], {
+     shell,
+     cwd,
+     env,
+     stdin: "ignore",
+-    detached: process.platform !== "win32",
++    detached: true,
+   })
+ }
+ const parser = lazy(async () => {
+@@ -322,17 +218,11 @@ const parser = lazy(async () => {
+   const { default: bashWasm } = await import("tree-sitter-bash/tree-sitter-bash.wasm" as string, {
+     with: { type: "wasm" },
+   })
+-  const { default: psWasm } = await import("tree-sitter-powershell/tree-sitter-powershell.wasm" as string, {
+-    with: { type: "wasm" },
+-  })
+   const bashPath = resolveWasm(bashWasm)
+-  const psPath = resolveWasm(psWasm)
+-  const [bashLanguage, psLanguage] = await Promise.all([Language.load(bashPath), Language.load(psPath)])
++  const bashLanguage = await Language.load(bashPath)
+   const bash = new Parser()
+   bash.setLanguage(bashLanguage)
+-  const ps = new Parser()
+-  ps.setLanguage(psLanguage)
+-  return { bash, ps }
++  return { bash }
+ })
+ 
+ export const ShellTool = Tool.define(
+@@ -346,39 +236,20 @@ export const ShellTool = Tool.define(
+     const flags = yield* RuntimeFlags.Service
+     const defaultTimeoutMs = flags.bashDefaultTimeoutMs ?? 2 * 60 * 1000
+ 
+-    const cygpath = Effect.fn("ShellTool.cygpath")(function* (shell: string, text: string) {
+-      const lines = yield* spawner
+-        .lines(ChildProcess.make(shell, ["-lc", 'cygpath -w -- "$1"', "_", text]))
+-        .pipe(Effect.catch(() => Effect.succeed([] as string[])))
+-      const file = lines[0]?.trim()
+-      if (!file) return
+-      return FSUtil.normalizePath(file)
+-    })
+-
+     const resolvePath = Effect.fn("ShellTool.resolvePath")(function* (text: string, root: string, shell: string) {
+-      if (process.platform === "win32") {
+-        if (Shell.posix(shell) && text.startsWith("/") && FSUtil.windowsPath(text) === text) {
+-          const file = yield* cygpath(shell, text)
+-          if (file) return file
+-        }
+-        return FSUtil.normalizePath(path.resolve(root, FSUtil.windowsPath(text)))
+-      }
+       return path.resolve(root, text)
+     })
+ 
+-    const argPath = Effect.fn("ShellTool.argPath")(function* (arg: string, cwd: string, ps: boolean, shell: string) {
+-      const text = ps ? expand(arg, cwd, shell) : home(unquote(arg))
++    const argPath = Effect.fn("ShellTool.argPath")(function* (arg: string, cwd: string, shell: string) {
++      const text = home(unquote(arg))
+       const file = text && prefix(text)
+-      if (!file || dynamic(file, ps)) return
+-      const next = ps ? provider(file) : file
+-      if (!next) return
+-      return yield* resolvePath(next, cwd, shell)
++      if (!file || dynamic(file)) return
++      return yield* resolvePath(file, cwd, shell)
+     })
+ 
+     const collect = Effect.fn("ShellTool.collect")(function* (
+       root: Node,
+       cwd: string,
+-      ps: boolean,
+       shell: string,
+       instance: InstanceContext,
+     ) {
+@@ -387,16 +258,14 @@ export const ShellTool = Tool.define(
+         patterns: new Set<string>(),
+         always: new Set<string>(),
+       }
+-      const shellKind = ShellID.toKind(Shell.name(shell))
+-
+       for (const node of commands(root)) {
+         const command = parts(node)
+         const tokens = command.map((item) => item.text)
+-        const cmd = ps || shellKind === "cmd" ? tokens[0]?.toLowerCase() : tokens[0]
++        const cmd = tokens[0]
+ 
+-        if (cmd && (FILES.has(cmd) || (shellKind === "cmd" && CMD_FILES.has(cmd)))) {
+-          for (const arg of pathArgs(command, ps, shellKind === "cmd")) {
+-            const resolved = yield* argPath(arg, cwd, ps, shell)
++        if (cmd && FILES.has(cmd)) {
++          for (const arg of pathArgs(command)) {
++            const resolved = yield* argPath(arg, cwd, shell)
+             yield* Effect.logInfo("resolved path", { arg, resolved })
+             if (!resolved || containsPath(resolved, instance)) continue
+             const dir = (yield* fs.isDir(resolved)) ? resolved : path.dirname(resolved)
+@@ -616,13 +485,12 @@ export const ShellTool = Tool.define(
+                 throw new Error(`Invalid timeout value: ${params.timeout}. Timeout must be a positive number.`)
+               }
+               const timeout = params.timeout ?? defaultTimeoutMs
+-              const ps = Shell.ps(shell)
+               yield* Effect.scoped(
+                 Effect.gen(function* () {
+-                  const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
++                  const tree = yield* Effect.acquireRelease(parse(params.command), (tree) =>
+                     Effect.sync(() => tree.delete()),
+                   )
+-                  const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
++                  const scan = yield* collect(tree.rootNode, cwd, shell, instanceCtx)
+                   if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
+                   yield* ask(ctx, scan, params)
+                 }),
+diff --git a/packages/opencode/src/tool/shell/id.ts b/packages/opencode/src/tool/shell/id.ts
+index 061253f..ebaeefe 100644
+--- a/packages/opencode/src/tool/shell/id.ts
++++ b/packages/opencode/src/tool/shell/id.ts
+@@ -1,4 +1,4 @@
+-const kinds = ["bash", "pwsh", "powershell", "cmd"] as const
++const kinds = ["bash"] as const
+ export type Kind = (typeof kinds)[number]
+ 
+ const shellKinds = new Set<string>(kinds)
+diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/tool/shell/prompt.ts
+index b576b77..964a1f8 100644
+--- a/packages/opencode/src/tool/shell/prompt.ts
++++ b/packages/opencode/src/tool/shell/prompt.ts
+@@ -4,9 +4,6 @@ import { PositiveInt } from "@opencode-ai/core/schema"
+ import { Global } from "@opencode-ai/core/global"
+ import { ShellID } from "./id"
+ 
+-const PS = new Set(["powershell", "pwsh"])
+-const CMD = new Set(["cmd"])
+-
+ export type Limits = {
+   maxLines: number
+   maxBytes: number
+@@ -33,45 +30,7 @@ function renderPrompt(template: string, values: Record<string, string>) {
+   })
+ }
+ 
+-function shellDisplayName(name: string) {
+-  if (name === "pwsh") return "PowerShell (7+)"
+-  if (name === "powershell") return "Windows PowerShell (5.1)"
+-  if (name === "cmd") return "cmd.exe"
+-  return name
+-}
+-
+-function powershellNotes(name: string) {
+-  if (name === "pwsh") {
+-    return `# PowerShell (7+) shell notes
+-- This cross-platform shell supports pipeline chain operators (\`&&\` and \`||\`).
+-- Use double quotes for interpolated strings (\`"Hello $name"\`), single quotes for verbatim strings.
+-- Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
+-- Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
+-- To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
+-- Escape special characters with the PowerShell backtick character.`
+-  }
+-  if (name === "powershell") {
+-    return `# Windows PowerShell (5.1) shell notes
+-- Use \`cmd1; if ($?) { cmd2 }\` to chain dependent commands.
+-- Use double quotes for interpolated strings (\`"Hello $name"\`), single quotes for verbatim strings.
+-- Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
+-- Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
+-- To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
+-- Escape special characters with the PowerShell backtick character.`
+-  }
+-  return ""
+-}
+-
+-function chainGuidance(name: string) {
+-  if (name === "powershell") {
+-    return "If the commands depend on each other and must run sequentially, avoid '&&' in this shell because Windows PowerShell (5.1) does not support it. Use PowerShell conditionals such as `cmd1; if ($?) { cmd2 }` when later commands must depend on earlier success."
+-  }
+-  if (PS.has(name)) {
+-    return "If the commands depend on each other and must run sequentially, use a single bash tool call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like New-Item before Copy-Item, Write before bash for git operations, or git add before git commit), run these operations sequentially instead."
+-  }
+-  if (CMD.has(name)) {
+-    return "If the commands depend on each other and must run sequentially, use a single bash tool call with `&&` to chain them together (e.g., `mkdir out && dir out`). For instance, if one operation must complete before another starts, run these operations sequentially instead."
+-  }
++function chainGuidance() {
+   return "If the commands depend on each other and must run sequentially, use a single Bash call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before Bash for git operations, or git add before git commit), run these operations sequentially instead."
+ }
+ 
+@@ -118,148 +77,13 @@ Usage notes:
+     </bad-example>`
+ }
+ 
+-function powershellCommandSection(
+-  name: string,
+-  chain: string,
+-  pathSep: string,
+-  limits: Limits,
+-  defaultTimeoutMs: number,
+-) {
+-  return `${powershellNotes(name)}
+-
+-Before executing the command, please follow these steps:
+-
+-1. Directory Verification:
+-   - If the command will create new directories or files, first use \`Test-Path -LiteralPath <parent>\` to verify the parent directory exists and is the correct location
+-   - For example, before creating \`foo${pathSep}bar\`, first use \`Test-Path -LiteralPath "foo"\` to check that \`foo\` exists and is the intended parent directory
+-
+-2. Command Execution:
+-   - Always quote file paths that contain spaces with double quotes (e.g., Remove-Item -LiteralPath "path with spaces${pathSep}file.txt")
+-   - Examples of proper quoting:
+-     - New-Item -ItemType Directory -Path "My Documents" (correct)
+-     - New-Item -ItemType Directory -Path My Documents (incorrect - path is split)
+-     - & "path with spaces${pathSep}script.ps1" (correct)
+-     - path with spaces${pathSep}script.ps1 (incorrect - path is split and not invoked)
+-   - After ensuring proper quoting, execute the command.
+-   - Capture the output of the command.
+-
+-Usage notes:
+-  - The command argument is required.
+-  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after ${defaultTimeoutMs}ms.
+-  - If the output exceeds ${limits.maxLines} lines or ${limits.maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use \`Select-Object -First\`, \`Select-Object -Last\`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
+-
+-  - Avoid using Shell with PowerShell file/content cmdlets unless explicitly instructed or when these cmdlets are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
+-    - File search: Use Glob (NOT Get-ChildItem)
+-    - Content search: Use Grep (NOT Select-String)
+-    - Read files: Use Read (NOT Get-Content)
+-    - Edit files: Use Edit (NOT Set-Content)
+-    - Write files: Use Write (NOT Set-Content/Out-File or here-strings)
+-    - Communication: Output text directly (NOT Write-Output/Write-Host)
+-  - When issuing multiple commands:
+-    - If the commands are independent and can run in parallel, make multiple bash tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two bash tool calls in parallel.
+-    - ${chain}
+-    - Use \`;\` only when you need to run commands sequentially but don't care if earlier commands fail
+-    - DO NOT use newlines to separate commands (newlines are ok in quoted strings)
+-  - AVOID changing directories inside the command. Use the \`workdir\` parameter to change directories instead.
+-    <good-example>
+-    Use workdir="project${pathSep}subdir" with command: pytest tests
+-    </good-example>
+-    <bad-example>
+-    ${name === "powershell" ? `Set-Location -LiteralPath "project${pathSep}subdir"; if ($?) { pytest tests }` : `Set-Location -LiteralPath "project${pathSep}subdir" && pytest tests`}
+-    </bad-example>`
+-}
+-
+-function cmdCommandSection(chain: string, limits: Limits, defaultTimeoutMs: number) {
+-  return `# cmd.exe shell notes
+-- Use double quotes for paths with spaces.
+-- Use %VAR% for environment variables.
+-- Use \`if exist\` for existence checks.
+-- Use \`call\` when invoking batch files from another batch-style command.
+-
+-Before executing the command, please follow these steps:
+-
+-1. Directory Verification:
+-   - If the command will create new directories or files, first use \`if exist\` to verify the parent directory exists and is the correct location
+-   - For example, before creating \`foo\\bar\`, first use \`if exist "foo\\" dir "foo"\` to check that \`foo\` exists and is the intended parent directory
+-
+-2. Command Execution:
+-   - Always quote file paths that contain spaces with double quotes (e.g., del "path with spaces\\file.txt")
+-   - Examples of proper quoting:
+-     - mkdir "My Documents" (correct)
+-     - mkdir My Documents (incorrect - path is split)
+-     - call "path with spaces\\script.bat" (correct)
+-     - path with spaces\\script.bat (incorrect - path is split and not invoked correctly)
+-   - After ensuring proper quoting, execute the command.
+-   - Capture the output of the command.
+-
+-Usage notes:
+-  - The command argument is required.
+-  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after ${defaultTimeoutMs}ms.
+-  - If the output exceeds ${limits.maxLines} lines or ${limits.maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use \`more\` or other pagination commands to limit output; the full output will already be captured to a file for more precise searching.
+-
+-  - Avoid using Shell with cmd.exe file/content commands unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
+-    - File search: Use Glob (NOT dir /s)
+-    - Content search: Use Grep (NOT findstr)
+-    - Read files: Use Read (NOT type)
+-    - Edit files: Use Edit (NOT copy)
+-    - Write files: Use Write (NOT echo > file)
+-    - Communication: Output text directly (NOT echo)
+-  - When issuing multiple commands:
+-    - If the commands are independent and can run in parallel, make multiple bash tool calls in a single message. For example, if you need to run "dir" and "where cmd", send a single message with two bash tool calls in parallel.
+-    - ${chain}
+-    - Use \`&\` only when you need to run commands sequentially but don't care if earlier commands fail
+-    - DO NOT use newlines to separate commands (newlines are ok in quoted strings)
+-  - AVOID changing directories inside the command. Use the \`workdir\` parameter to change directories instead.
+-    <good-example>
+-    Use workdir="project\\subdir" with command: dir
+-    </good-example>
+-    <bad-example>
+-    cd /d "project\\subdir" && dir
+-    </bad-example>`
+-}
+-
+-function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaultTimeoutMs: number) {
+-  const isPowerShell = PS.has(name)
+-  const chain = chainGuidance(name)
+-  if (CMD.has(name)) {
+-    return {
+-      intro: `Executes a given ${shellDisplayName(name)} command with optional timeout, ensuring proper handling and security measures.`,
+-      workdirSection:
+-        "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID changing directories inside the command - use `workdir` instead.",
+-      commandSection: cmdCommandSection(chain, limits, defaultTimeoutMs),
+-      gitCommands: "git commands",
+-      gitCommandRestriction: "git commands",
+-      createPrInstruction: "Create PR using a temporary body file so cmd.exe quoting stays simple.",
+-      createPrExample: `(\n  echo ## Summary\n  echo - ^<1-3 bullet points^>\n) > pr-body.txt\ngh pr create --title "the pr title" --body-file pr-body.txt`,
+-    }
+-  }
+-  if (isPowerShell) {
+-    return {
+-      intro: `Executes a given ${shellDisplayName(name)} command with optional timeout, ensuring proper handling and security measures.`,
+-      workdirSection:
+-        "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID changing directories inside the command - use `workdir` instead.",
+-      commandSection: powershellCommandSection(
+-        name,
+-        chain,
+-        platform === "win32" ? "\\" : "/",
+-        limits,
+-        defaultTimeoutMs,
+-      ),
+-      gitCommands: "git commands",
+-      gitCommandRestriction: "git commands",
+-      createPrInstruction: "Create PR using gh pr create with a PowerShell here-string to pass the body correctly.",
+-      createPrExample: `gh pr create --title "the pr title" --body @'
+-## Summary
+-- <1-3 bullet points>
+-'@`,
+-    }
+-  }
++function profile(limits: Limits, defaultTimeoutMs: number) {
+   return {
+     intro:
+       "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.",
+     workdirSection:
+       "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.",
+-    commandSection: bashCommandSection(chain, limits, defaultTimeoutMs),
++    commandSection: bashCommandSection(chainGuidance(), limits, defaultTimeoutMs),
+     gitCommands: "bash commands",
+     gitCommandRestriction: "git bash commands",
+     createPrInstruction:
+@@ -271,7 +95,7 @@ function profile(name: string, platform: NodeJS.Platform, limits: Limits, defaul
+ }
+ 
+ export function render(name: string, platform: NodeJS.Platform, limits: Limits, defaultTimeoutMs: number) {
+-  const selected = profile(name, platform, limits, defaultTimeoutMs)
++  const selected = profile(limits, defaultTimeoutMs)
+   return {
+     description: renderPrompt(DESCRIPTION, {
+       intro: selected.intro,
+diff --git a/bun.lock b/bun.lock
+index 4509894..dfffb04 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -1070,6 +1070,7 @@
+     "@npmcli/agent@4.0.2": "patches/@npmcli%2Fagent@4.0.2.patch",
+     "@ai-sdk/amazon-bedrock@4.0.166": "patches/@ai-sdk%2Famazon-bedrock@4.0.166.patch",
+     "@ai-sdk/groq@3.0.31": "patches/@ai-sdk%2Fgroq@3.0.31.patch",
++    "@opentui/core@0.4.5": "patches/@opentui%2Fcore@0.4.5.patch",
+     "@ai-sdk/xai@3.0.139": "patches/@ai-sdk%2Fxai@3.0.139.patch",
+     "@ai-sdk/google@3.0.73": "patches/@ai-sdk%2Fgoogle@3.0.73.patch",
+     "pacote@21.5.0": "patches/pacote@21.5.0.patch",
+diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
+index 1cc47a7..4c49691 100644
+--- a/packages/core/test/shell.test.ts
++++ b/packages/core/test/shell.test.ts
+@@ -1,8 +1,5 @@
+ import { describe, expect, test } from "bun:test"
+-import path from "path"
+ import { Shell } from "@opencode-ai/core/shell"
+-import { FSUtil } from "@opencode-ai/core/fs-util"
+-import { which } from "@opencode-ai/core/util/which"
+ 
+ const withShell = async (shell: string | undefined, fn: () => void | Promise<void>) => {
+   const prev = process.env.SHELL
+@@ -23,21 +20,16 @@ const withShell = async (shell: string | undefined, fn: () => void | Promise<voi
+ describe("shell", () => {
+   test("normalizes shell names", () => {
+     expect(Shell.name("/bin/bash")).toBe("bash")
+-    if (process.platform === "win32") {
+-      expect(Shell.name("C:/tools/NU.EXE")).toBe("nu")
+-      expect(Shell.name("C:/tools/PWSH.EXE")).toBe("pwsh")
+-    }
+   })
+ 
+   test("detects login shells", () => {
+     expect(Shell.login("/bin/bash")).toBe(true)
+-    expect(Shell.login("C:/tools/pwsh.exe")).toBe(false)
++    expect(Shell.login("/bin/fish")).toBe(false)
+   })
+ 
+   test("detects posix shells", () => {
+     expect(Shell.posix("/bin/bash")).toBe(true)
+     expect(Shell.posix("/bin/fish")).toBe(false)
+-    expect(Shell.posix("C:/tools/pwsh.exe")).toBe(false)
+   })
+ 
+   test("falls back when configured shell cannot be resolved", async () => {
+@@ -54,55 +46,11 @@ describe("shell", () => {
+     expect(Shell.name(Shell.acceptable("nu"))).not.toBe("nu")
+   })
+ 
+-  test("builds command args per shell family", () => {
+-    expect(Shell.args("/bin/sh", "echo hi", "/tmp")).toEqual(["-c", "echo hi"])
+-    expect(Shell.args("/usr/bin/fish", "echo hi", "/tmp")).toEqual(["-c", "echo hi"])
+-    const zsh = Shell.args("/bin/zsh", "echo hi", "/tmp")
+-    expect(zsh[0]).toBe("-l")
+-    expect(zsh[1]).toBe("-c")
+-    expect(zsh.at(-1)).toBe("/tmp")
++  test("builds bash command args for every shell name", () => {
++    const bash = Shell.args("/bin/bash", "echo hi", "/tmp")
++    expect(bash[0]).toBe("-l")
++    expect(bash[1]).toBe("-c")
++    expect(bash.at(-1)).toBe("/tmp")
++    expect(Shell.args("/bin/zsh", "echo hi", "/tmp")).toEqual(bash)
+   })
+-
+-  if (process.platform === "win32") {
+-    test("rejects blacklisted shells case-insensitively", async () => {
+-      await withShell("NU.EXE", async () => {
+-        expect(Shell.name(Shell.acceptable())).not.toBe("nu")
+-      })
+-    })
+-
+-    test("normalizes Git Bash shell paths from env", async () => {
+-      const shell = "/cygdrive/c/Program Files/Git/bin/bash.exe"
+-      await withShell(shell, async () => {
+-        expect(Shell.preferred()).toBe(FSUtil.windowsPath(shell))
+-      })
+-    })
+-
+-    test("resolves /usr/bin/bash from env to Git Bash", async () => {
+-      const bash = Shell.gitbash()
+-      if (!bash) return
+-      await withShell("/usr/bin/bash", async () => {
+-        expect(Shell.acceptable()).toBe(bash)
+-        expect(Shell.preferred()).toBe(bash)
+-      })
+-    })
+-
+-    test("resolves bare bash to Git Bash before PATH", async () => {
+-      const bash = Shell.gitbash()
+-      if (!bash) return
+-      expect(Shell.acceptable("bash")).toBe(bash)
+-      expect(Shell.preferred("bash")).toBe(bash)
+-      await withShell("bash", async () => {
+-        expect(Shell.acceptable()).toBe(bash)
+-        expect(Shell.preferred()).toBe(bash)
+-      })
+-    })
+-
+-    test("resolves bare PowerShell shells", async () => {
+-      const shell = which("pwsh") || which("powershell")
+-      if (!shell) return
+-      await withShell(path.win32.basename(shell), async () => {
+-        expect(Shell.preferred()).toBe(shell)
+-      })
+-    })
+-  }
+ })
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index 02c31ad..510442d 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -86,11 +86,7 @@ const quote = (text: string) => `"${text}"`
+ const squote = (text: string) => `'${text}'`
+ const projectRoot = path.join(__dirname, "../..")
+ const bin = quote(process.execPath.replaceAll("\\", "/"))
+-const bash = (() => {
+-  const shell = Shell.acceptable()
+-  if (Shell.name(shell) === "bash") return shell
+-  return Shell.gitbash()
+-})()
++const bash = Shell.acceptable()
+ const shells = (() => {
+   if (process.platform !== "win32") {
+     const shell = Shell.acceptable()
