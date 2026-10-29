@@ -47,8 +47,9 @@ ZIG_TARGET="aarch64-linux-android.${ANDROID_API}"
 mkdir -p "${WORK_DIR}" "${ASSETS_DIR}"
 
 # The Android NDK is resolved once, up front: the Rust build needs its
-# toolchain, and the Zig build needs its sysroot, which holds the Bionic
-# stub libraries (dl, pthread) that libopentui links against.
+# toolchain, and the Zig build of libopentui needs its sysroot, which
+# provides the Bionic libc the Zig toolchain cannot provide itself and
+# the libdl stub library (Plan 0002, Section 7.1).
 if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
   SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
   ANDROID_NDK_HOME="$(ls -d "${SDK_ROOT}"/ndk/* 2>/dev/null | sort -V | tail -n 1 || true)"
@@ -59,8 +60,9 @@ if [[ -z "${ANDROID_NDK_HOME:-}" || ! -d "${ANDROID_NDK_HOME}" ]]; then
 fi
 echo "natives: using Android NDK at ${ANDROID_NDK_HOME}"
 NDK_SYSROOT="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-if [[ ! -d "${NDK_SYSROOT}" ]]; then
-  echo "error: NDK sysroot not found: ${NDK_SYSROOT}" >&2
+NDK_LIB_DIR="${NDK_SYSROOT}/usr/lib/aarch64-linux-android/${ANDROID_API}"
+if [[ ! -d "${NDK_SYSROOT}" || ! -d "${NDK_LIB_DIR}" ]]; then
+  echo "error: NDK sysroot layout not recognized under ${ANDROID_NDK_HOME}" >&2
   exit 1
 fi
 
@@ -81,13 +83,38 @@ if [[ "${DESCRIBED}" != "${OPENTUI_TAG}" ]]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "natives: applying the Android patch to the OpenTUI Zig build"
+git -C "${OPENTUI_DIR}" apply "${SCRIPT_DIR}/opentui-zig-android.patch"
+
+# Zig cannot see the NDK sysroot's arch-specific headers (asm/types.h and
+# its siblings) through a plain libc file, so stage a merged include tree:
+# the generic sysroot headers with the AArch64 header tree merged over
+# them, as symlinks.
+NDK_INCLUDE_DIR="${WORK_DIR}/ndk-include"
+rm -rf "${NDK_INCLUDE_DIR}"
+mkdir -p "${NDK_INCLUDE_DIR}"
+cp -rs "${NDK_SYSROOT}/usr/include/." "${NDK_INCLUDE_DIR}/"
+cp -rs "${NDK_SYSROOT}/usr/include/aarch64-linux-android/." "${NDK_INCLUDE_DIR}/"
+
+ZIG_LIBC_FILE="${WORK_DIR}/ndk-libc.txt"
+{
+  echo "include_dir=${NDK_INCLUDE_DIR}"
+  echo "sys_include_dir=${NDK_INCLUDE_DIR}"
+  echo "crt_dir=${NDK_LIB_DIR}"
+  echo "msvc_lib_dir="
+  echo "kernel32_lib_dir="
+  echo "gcc_dir="
+} > "${ZIG_LIBC_FILE}"
+
 echo "natives: building libopentui for ${ZIG_TARGET} with Zig $(zig version)"
 (
   cd "${OPENTUI_DIR}/packages/core/src/zig"
-  zig build "-Dtarget=${ZIG_TARGET}" --sysroot "${NDK_SYSROOT}" -Doptimize=ReleaseFast
+  OPENICK_ANDROID_LIB_DIR="${NDK_LIB_DIR}" \
+    zig build "-Dtarget=${ZIG_TARGET}" --libc "${ZIG_LIBC_FILE}" -Doptimize=ReleaseFast
 )
 
-LIBOPENTUI="$(find "${OPENTUI_DIR}/packages/core/src/lib" -name 'libopentui.so' -type f | head -n 1)"
+LIBOPENTUI="$(find "${OPENTUI_DIR}/packages/core/src/zig/lib" -name 'libopentui.so' -type f | head -n 1)"
 if [[ -z "${LIBOPENTUI}" ]]; then
   echo "error: zig build produced no libopentui.so" >&2
   exit 1
