@@ -1,0 +1,104 @@
+Purpose: Add an opt-in --android mode to the upstream build script that builds exactly one additional target, opencode-android-arm64, for Android (Bionic). The mode maps the target to the valid Bun compile target bun-linux-arm64-android and stages the Android native assets named by OPENICK_ANDROID_ASSETS (Plan 0002, Section 7) into the dependency tree before bundling. Without --android the script behaves exactly as upstream.
+Upstream files: packages/opencode/script/build.ts
+Rebase note: Check the flag declarations, the targets ternary, the dependency installation block, the compile target expression, and the release tarball condition first; those are the five anchor points of this patch.
+
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+index 60a674a..ebc3eae 100755
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -22,6 +22,7 @@ const skipInstall = process.argv.includes("--skip-install")
+ const sourcemapsFlag = process.argv.includes("--sourcemaps")
+ const plugin = createSolidTransformPlugin()
+ const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
++const androidFlag = process.argv.includes("--android")
+ 
+ const createEmbeddedWebUIBundle = async () => {
+   console.log(`Building Web UI to embed in the binary`)
+@@ -113,26 +114,28 @@ const allTargets: {
+   },
+ ]
+ 
+-const targets = singleFlag
+-  ? allTargets.filter((item) => {
+-      if (item.os !== process.platform || item.arch !== process.arch) {
+-        return false
+-      }
++const targets = androidFlag
++  ? [{ os: "android", arch: "arm64" as const }]
++  : singleFlag
++    ? allTargets.filter((item) => {
++        if (item.os !== process.platform || item.arch !== process.arch) {
++          return false
++        }
+ 
+-      // When building for the current platform, prefer a single native binary by default.
+-      // Baseline binaries require additional Bun artifacts and can be flaky to download.
+-      if (item.avx2 === false) {
+-        return baselineFlag
+-      }
++        // When building for the current platform, prefer a single native binary by default.
++        // Baseline binaries require additional Bun artifacts and can be flaky to download.
++        if (item.avx2 === false) {
++          return baselineFlag
++        }
+ 
+-      // also skip abi-specific builds for the same reason
+-      if (item.abi !== undefined) {
+-        return false
+-      }
++        // also skip abi-specific builds for the same reason
++        if (item.abi !== undefined) {
++          return false
++        }
+ 
+-      return true
+-    })
+-  : allTargets
++        return true
++      })
++    : allTargets
+ 
+ await $`rm -rf dist`
+ 
+@@ -143,6 +146,23 @@ if (!skipInstall) {
+   await $`bun install --os="*" --cpu="*" --libc="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
+   await $`bun install --os="*" --cpu="*" --libc="*" @ff-labs/fff-bun@${pkg.dependencies["@ff-labs/fff-bun"]}`
+ }
++
++if (androidFlag) {
++  // Stage the Android native assets built from their pinned upstream sources
++  // (Plan 0002, Section 7) into the dependency tree so the bundler embeds
++  // them: the fabricated @opentui/core-android-arm64 platform package next to
++  // the other @opentui platform packages, and the Android build of the
++  // bun-pty Rust library at the path its loader selects on Android ARM64.
++  const assetsDir = process.env.OPENICK_ANDROID_ASSETS
++  if (!assetsDir) {
++    console.error("error: OPENICK_ANDROID_ASSETS must name the staged Android native assets directory in --android mode")
++    process.exit(1)
++  }
++  await $`mkdir -p node_modules/@opentui`
++  await $`cp -r ${assetsDir}/core-android-arm64 node_modules/@opentui/core-android-arm64`
++  const bunPtyDir = (await $`realpath node_modules/bun-pty`.text()).trim()
++  await $`cp ${assetsDir}/librust_pty_arm64.so ${bunPtyDir}/rust-pty/target/release/librust_pty_arm64.so`
++}
+ for (const item of targets) {
+   const name = [
+     pkg.name,
+@@ -175,7 +195,7 @@ for (const item of targets) {
+       autoloadDotenv: false,
+       autoloadTsconfig: true,
+       autoloadPackageJson: true,
+-      target: name.replace(pkg.name, "bun") as any,
++      target: (item.os === "android" ? "bun-linux-arm64-android" : name.replace(pkg.name, "bun")) as any,
+       outfile: `dist/${name}/bin/opencode`,
+       execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
+       windows: {},
+@@ -241,7 +261,7 @@ for (const item of targets) {
+ 
+ if (Script.release) {
+   for (const key of Object.keys(binaries)) {
+-    if (key.includes("linux")) {
++    if (key.includes("linux") || key.includes("android")) {
+       await $`tar -czf ../../${key}.tar.gz *`.cwd(`dist/${key}/bin`)
+     } else {
+       await $`zip -r ../../${key}.zip *`.cwd(`dist/${key}/bin`)
