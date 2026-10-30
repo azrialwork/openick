@@ -87,6 +87,20 @@ Verified facts this plan is built on:
    `scripts/verify-branding.sh` is not modified.
 9. **Repository automation is untouched.** No workflow, packaging script,
    patch, or overlay changes under this plan.
+10. **Full ASCII interface.** Every character the installer prints is
+    plain ASCII, and the script source itself is ASCII-only: the banner
+    and the success panel are drawn with `+`, `-`, `=`, and `|`; the
+    download progress bar uses `#` and `-`; the spinner cycles `|`, `/`,
+    `-`, and `\`; completed steps are marked `[OK]` and failures
+    `[FAILED]`. Color is used sparingly on terminals (green step results,
+    red errors, one accent color for the progress bar) and is suppressed
+    by `NO_COLOR`, by the `--no-progress` option, and by the
+    `OPENICK_NO_PROGRESS` environment variable. Animation renders only
+    when standard output is a terminal; output to a pipe or a log falls
+    back to plain step lines. The interface change alters no install
+    behavior of Decisions 1 to 9: platform detection, version rules,
+    mandatory checksum verification, and failure semantics are unchanged,
+    and the presentation code is isolated from the install logic.
 
 ## 3. Roles
 
@@ -125,6 +139,11 @@ Manager (plan, documentation), Programmer (the script), Quality Control
    exit.
 5. Handle the `PATH` (Locked Decision 5) and print the installed version
    by running the installed binary's `--version`.
+6. Present the run in the full ASCII interface of Locked Decision 10: a
+   banner, one `[OK]` line per completed step, and, on a terminal, a
+   live progress bar for the archive download showing percent,
+   downloaded and total megabytes, transfer rate, and estimated time
+   remaining when the total size is known.
 
 ## 6. Verification Gates
 
@@ -152,6 +171,7 @@ Manager (plan, documentation), Programmer (the script), Quality Control
 | 2026-10-30 | Plan created. |
 | 2026-10-30 | Two defects found by the gate 2 real-install run and fixed in the same series: the published `SHA256SUMS` prefixes asset names with `./`, so the checksum lookup now accepts both the bare name and the `./`-prefixed name; and `tar` extraction no longer decides success by its exit status, because as root it fails on restoring the archive's uid/gid after extracting the file — the checksum (verified before extraction) proves the archive, and the binary existence check decides success. |
 | 2026-10-30 | Plan completed. All gates pass: `bash -n` is clean; the real install from GitHub into a scratch directory verifies the checksum, installs, and reports 1.19.5, and a rerun reports the version as already installed; the simulated Termux run installs `opencode-android-arm64.tar.gz` into the stubbed `$PREFIX/bin` with the installed binary's SHA-256 identical to the archive's binary, and the simulated musl arm64 run (stubbed `uname` and `ldd`) selects and installs `opencode-linux-arm64-musl.tar.gz`; against a corrupted mirror archive the script aborts with a checksum error and installs nothing; the `--binary` path installs a local binary that reports 1.19.5; `materialize.sh` completes against the pin and `verify-branding.sh` passes. |
+| 2026-10-30 | Amendment: Locked Decision 10 locks a full ASCII interface for the installer (ASCII banner, step markers, progress bar, spinner, and success panel; terminal-only animation with plain fallbacks), at the repository owner's direction. No install behavior changes. The acceptance criterion for the interface is added below and is checked when the amendment's gates pass. |
 
 ## 8. Acceptance Criteria
 
@@ -161,3 +181,6 @@ Manager (plan, documentation), Programmer (the script), Quality Control
 - [x] The checksum-failure gate passes (gate 4).
 - [x] The repository gates pass (gate 5).
 - [x] `README.md` carries an Install section with the one-line command.
+- [ ] The full ASCII interface (Locked Decision 10) is implemented: the
+  script source and all of its output are ASCII-only, the terminal run
+  shows the progress bar, and the plain fallbacks work.
