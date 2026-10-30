@@ -84,3 +84,11 @@ revoked patch held:
   target's `libopentui.so` (and the staged Android `librust_pty` library)
   of symbol and debug data before bundling, under the tool contract of
   Plan 0007, Locked Decision 4.
+
+Plan `docs/plan/0008-remove-generate-command.md` adds one patch:
+
+- `0012-remove-generate-command.patch` deletes the `opencode generate`
+  command (its module and its registration). The command printed the
+  server's OpenAPI specification through the `prettier` library, its
+  only importer in the bundle graph; the OpenAPI machinery itself and
+  every other command stay.
