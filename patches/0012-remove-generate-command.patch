@@ -1,0 +1,101 @@
+# Patch 0012 — Remove the generate command
+#
+# Purpose: Delete the opencode generate command in full. The command
+# prints the server's OpenAPI specification, formatted through the
+# prettier library, to standard output; it is a maintainer tool for
+# regenerating the committed openapi.json. Nothing in the TUI, in
+# opencode run, or in any other command calls it, and it is the only
+# importer of the prettier package in the bundle graph (about 3.5 MiB
+# of formatter library and plugins in every binary). Deleting the
+# command removes both. The Server.openapi() machinery it wrapped is
+# shared server infrastructure and stays, as does the prettier
+# dependency declaration used by repository tooling outside the
+# bundle.
+#
+# Upstream files:
+#   - packages/opencode/src/cli/cmd/generate.ts (deleted)
+#   - packages/opencode/src/index.ts (import and registration removed)
+#
+# Rebase note: two files, both low traffic. If upstream edits the
+# command list in index.ts, re-apply by deleting the import and the
+# .command(GenerateCommand) line and the module file.
+diff --git a/packages/opencode/src/cli/cmd/generate.ts b/packages/opencode/src/cli/cmd/generate.ts
+deleted file mode 100644
+index 414d7fb..0000000
+--- a/packages/opencode/src/cli/cmd/generate.ts
++++ /dev/null
+@@ -1,54 +0,0 @@
+-import type { CommandModule } from "yargs"
+-
+-type Args = {}
+-
+-export const GenerateCommand = {
+-  command: "generate",
+-  builder: (yargs) => yargs,
+-  handler: async () => {
+-    const { Server } = await import("../../server/server")
+-    const specs = (await Server.openapi()) as {
+-      paths: Record<string, Record<string, any>>
+-    }
+-    for (const item of Object.values(specs.paths)) {
+-      for (const method of ["get", "post", "put", "delete", "patch"] as const) {
+-        const operation = item[method]
+-        if (!operation?.operationId) continue
+-        operation["x-codeSamples"] = [
+-          {
+-            lang: "js",
+-            source: [
+-              `import { createOpencodeClient } from "@opencode-ai/sdk`,
+-              ``,
+-              `const client = createOpencodeClient()`,
+-              `await client.${operation.operationId}({`,
+-              `  ...`,
+-              `})`,
+-            ].join("\n"),
+-          },
+-        ]
+-      }
+-    }
+-    const raw = JSON.stringify(specs, null, 2)
+-
+-    // Format through prettier so output is byte-identical to committed file
+-    // regardless of whether ./script/format.ts runs afterward.
+-    const prettier = await import("prettier")
+-    const babel = await import("prettier/plugins/babel")
+-    const estree = await import("prettier/plugins/estree")
+-    const format = prettier.format ?? prettier.default?.format
+-    const json = await format(raw, {
+-      parser: "json",
+-      plugins: [babel.default ?? babel, estree.default ?? estree],
+-      printWidth: 120,
+-    })
+-
+-    // Wait for stdout to finish writing before process.exit() is called
+-    await new Promise<void>((resolve, reject) => {
+-      process.stdout.write(json, (err) => {
+-        if (err) reject(err)
+-        else resolve()
+-      })
+-    })
+-  },
+-} satisfies CommandModule<object, Args>
+diff --git a/packages/opencode/src/index.ts b/packages/opencode/src/index.ts
+index ed24fe8..adb1400 100644
+--- a/packages/opencode/src/index.ts
++++ b/packages/opencode/src/index.ts
+@@ -1,7 +1,6 @@
+ import yargs from "yargs"
+ import { hideBin } from "yargs/helpers"
+ import { RunCommand } from "./cli/cmd/run"
+-import { GenerateCommand } from "./cli/cmd/generate"
+ import { ConsoleCommand } from "./cli/cmd/account"
+ import { ProvidersCommand } from "./cli/cmd/providers"
+ import { AgentCommand } from "./cli/cmd/agent"
+@@ -75,7 +74,6 @@ const cli = yargs(args)
+   .command(McpCommand)
+   .command(TuiThreadCommand)
+   .command(RunCommand)
+-  .command(GenerateCommand)
+   .command(DebugCommand)
+   .command(ConsoleCommand)
+   .command(ProvidersCommand)
