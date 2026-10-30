@@ -172,6 +172,7 @@ Manager (plan, documentation), Programmer (the script), Quality Control
 | 2026-10-30 | Two defects found by the gate 2 real-install run and fixed in the same series: the published `SHA256SUMS` prefixes asset names with `./`, so the checksum lookup now accepts both the bare name and the `./`-prefixed name; and `tar` extraction no longer decides success by its exit status, because as root it fails on restoring the archive's uid/gid after extracting the file — the checksum (verified before extraction) proves the archive, and the binary existence check decides success. |
 | 2026-10-30 | Plan completed. All gates pass: `bash -n` is clean; the real install from GitHub into a scratch directory verifies the checksum, installs, and reports 1.19.5, and a rerun reports the version as already installed; the simulated Termux run installs `opencode-android-arm64.tar.gz` into the stubbed `$PREFIX/bin` with the installed binary's SHA-256 identical to the archive's binary, and the simulated musl arm64 run (stubbed `uname` and `ldd`) selects and installs `opencode-linux-arm64-musl.tar.gz`; against a corrupted mirror archive the script aborts with a checksum error and installs nothing; the `--binary` path installs a local binary that reports 1.19.5; `materialize.sh` completes against the pin and `verify-branding.sh` passes. |
 | 2026-10-30 | Amendment: Locked Decision 10 locks a full ASCII interface for the installer (ASCII banner, step markers, progress bar, spinner, and success panel; terminal-only animation with plain fallbacks), at the repository owner's direction. No install behavior changes. The acceptance criterion for the interface is added below and is checked when the amendment's gates pass. |
+| 2026-10-30 | Amendment completed. All gates pass: `bash -n` is clean and the script source is verified ASCII-only; a real install from GitHub under a pseudo-terminal renders the banner, the step lines, the spinner, live progress-bar frames reaching 100% with percent, megabytes, rate, and ETA, and the boxed success panel, and the installed binary reports 1.19.5; a non-terminal run prints the same step lines with zero escape bytes; a `NO_COLOR` terminal run prints the ASCII interface with zero escape bytes; the Plan 0006 functional gates re-run green (Termux simulation installs the Android archive with an identical binary hash, musl arm64 simulation installs, a doctored `SHA256SUMS` aborts with a checksum mismatch and installs nothing, a rerun reports the version as already installed); `materialize.sh` completes against the pin and `verify-branding.sh` passes. |
 
 ## 8. Acceptance Criteria
 
@@ -181,6 +182,6 @@ Manager (plan, documentation), Programmer (the script), Quality Control
 - [x] The checksum-failure gate passes (gate 4).
 - [x] The repository gates pass (gate 5).
 - [x] `README.md` carries an Install section with the one-line command.
-- [ ] The full ASCII interface (Locked Decision 10) is implemented: the
+- [x] The full ASCII interface (Locked Decision 10) is implemented: the
   script source and all of its output are ASCII-only, the terminal run
   shows the progress bar, and the plain fallbacks work.
