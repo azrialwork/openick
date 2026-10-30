@@ -76,6 +76,28 @@ names the failing patch and the target release.
 | `.github/workflows/` | The six-hour check, the validation workflow, the release workflow, and the Android build workflow. |
 | `docs/plan/` | Numbered plan files. One file covers one context and states decisions without alternatives. |
 
+## Install
+
+Install the latest release with one command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/azrialwork/openick/main/install.sh | bash
+```
+
+The installer detects the platform, downloads the matching release
+archive, verifies it against the release's `SHA256SUMS`, and installs
+the `opencode` binary into `~/.opencode/bin` (under Termux, into
+`$PREFIX/bin`). To install a specific release instead:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/azrialwork/openick/main/install.sh | bash -s -- --version 1.19.5
+```
+
+Supported targets are Linux x64 and arm64 (glibc or musl) and Android
+arm64 (Termux). See `install.sh --help` for all options, including
+`--binary` for installing from a local file, and
+`docs/plan/0006-install-script.md` for the design.
+
 ## Releases
 
 Releases are published on the
