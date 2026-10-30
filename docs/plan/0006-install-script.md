@@ -4,7 +4,7 @@
 | --- | --- |
 | Plan ID | 0006 |
 | File | `docs/plan/0006-install-script.md` |
-| Status | Active |
+| Status | Completed |
 | Created | 2026-10-30 |
 | Repository | `azrialwork/openick` |
 | Upstream | `anomalyco/opencode` |
@@ -150,12 +150,14 @@ Manager (plan, documentation), Programmer (the script), Quality Control
 | Date | Amendment |
 | --- | --- |
 | 2026-10-30 | Plan created. |
+| 2026-10-30 | Two defects found by the gate 2 real-install run and fixed in the same series: the published `SHA256SUMS` prefixes asset names with `./`, so the checksum lookup now accepts both the bare name and the `./`-prefixed name; and `tar` extraction no longer decides success by its exit status, because as root it fails on restoring the archive's uid/gid after extracting the file — the checksum (verified before extraction) proves the archive, and the binary existence check decides success. |
+| 2026-10-30 | Plan completed. All gates pass: `bash -n` is clean; the real install from GitHub into a scratch directory verifies the checksum, installs, and reports 1.19.5, and a rerun reports the version as already installed; the simulated Termux run installs `opencode-android-arm64.tar.gz` into the stubbed `$PREFIX/bin` with the installed binary's SHA-256 identical to the archive's binary, and the simulated musl arm64 run (stubbed `uname` and `ldd`) selects and installs `opencode-linux-arm64-musl.tar.gz`; against a corrupted mirror archive the script aborts with a checksum error and installs nothing; the `--binary` path installs a local binary that reports 1.19.5; `materialize.sh` completes against the pin and `verify-branding.sh` passes. |
 
 ## 8. Acceptance Criteria
 
-- [ ] `install.sh` exists at the repository root and passes gate 1.
-- [ ] The real-install gate passes (gate 2).
-- [ ] The simulated-target gates pass (gate 3).
-- [ ] The checksum-failure gate passes (gate 4).
-- [ ] The repository gates pass (gate 5).
-- [ ] `README.md` carries an Install section with the one-line command.
+- [x] `install.sh` exists at the repository root and passes gate 1.
+- [x] The real-install gate passes (gate 2).
+- [x] The simulated-target gates pass (gate 3).
+- [x] The checksum-failure gate passes (gate 4).
+- [x] The repository gates pass (gate 5).
+- [x] `README.md` carries an Install section with the one-line command.
