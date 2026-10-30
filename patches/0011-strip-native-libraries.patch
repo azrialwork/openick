@@ -1,0 +1,84 @@
+Purpose: Strip symbol and debug data from the native libraries embedded in the shipped binaries (Plan 0007). The build script strips each target's libopentui.so from the OpenTUI platform package immediately before that target's bundle step, and strips the staged librust_pty_arm64.so in --android mode. The strip tool resolves as $OPENICK_STRIP, then llvm-strip, then strip; a missing tool or a failed strip aborts the build. The compiled binary itself is never stripped.
+Upstream files: packages/opencode/script/build.ts
+Rebase note: The step anchors on the targets loop and the --android staging block, both already touched by patches 0001 and 0003. If upstream renames the platform packages or restructures the loop, re-anchor the stripNative and opentuiLibPath helpers beside the bundle step; the invariant is that every embedded libopentui.so is stripped exactly once before bundling.
+
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+index fe3be34..4941ecd 100755
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -85,6 +85,51 @@ const targets = androidFlag
+       })
+     : allTargets
+ 
++// (Plan 0007) Native libraries are stripped of symbol and debug data
++// before bundling: the libopentui.so embedded from the OpenTUI platform
++// package carries roughly ten megabytes of symbols the runtime never
++// uses. The strip tool resolves as $OPENICK_STRIP, then llvm-strip,
++// then strip. A missing tool or a failed strip aborts the build: no
++// build silently ships an unstripped library. The compiled binary
++// itself is never stripped; that destroys the embedded payload.
++const stripTool = (() => {
++  for (const candidate of [process.env.OPENICK_STRIP, "llvm-strip", "strip"]) {
++    if (candidate && Bun.which(candidate)) return candidate
++  }
++  return undefined
++})()
++
++async function stripNative(file: string) {
++  if (!stripTool) {
++    console.error(`error: no strip tool found (looked for $OPENICK_STRIP, llvm-strip, strip); cannot strip ${file}`)
++    process.exit(1)
++  }
++  const result = await $`${stripTool} ${file}`.quiet().nothrow()
++  if (result.exitCode !== 0) {
++    console.error(`error: ${stripTool} failed on ${file}: ${result.stderr.toString().trim()}`)
++    process.exit(1)
++  }
++  console.log(`stripped ${file} with ${stripTool}`)
++}
++
++async function opentuiLibPath(item: (typeof allTargets)[number] & { os: string }) {
++  const pkgName =
++    item.os === "android"
++      ? "core-android-arm64"
++      : `core-${item.os}-${item.arch}${item.abi === "musl" ? "-musl" : ""}`
++  const candidates: string[] = []
++  try {
++    const coreDir = (await $`realpath node_modules/@opentui/core`.text()).trim()
++    candidates.push(path.join(path.dirname(coreDir), pkgName, "libopentui.so"))
++  } catch {}
++  candidates.push(path.join(dir, "node_modules", "@opentui", pkgName, "libopentui.so"))
++  candidates.push(path.join(dir, "..", "..", "node_modules", "@opentui", pkgName, "libopentui.so"))
++  for (const candidate of candidates) {
++    if (await Bun.file(candidate).exists()) return candidate
++  }
++  return undefined
++}
++
+ await $`rm -rf dist`
+ 
+ const binaries: Record<string, string> = {}
+@@ -115,6 +160,9 @@ if (androidFlag) {
+   // bun-pty is a dependency of the core package, not of this package.
+   const bunPtyDir = (await $`realpath ${path.join(dir, "../core/node_modules/bun-pty")}`.text()).trim()
+   await $`cp ${assetsDir}/librust_pty_arm64.so ${bunPtyDir}/rust-pty/target/release/librust_pty_arm64.so`
++  // (Plan 0007) The staged PTY library is stripped by the same rule as
++  // the OpenTUI library.
++  await stripNative(path.join(bunPtyDir, "rust-pty/target/release/librust_pty_arm64.so"))
+ }
+ for (const item of targets) {
+   const name = [
+@@ -127,6 +175,13 @@ for (const item of targets) {
+     .filter(Boolean)
+     .join("-")
+   console.log(`building ${name}`)
++  // (Plan 0007) Strip the target's native library before bundling.
++  const libPath = await opentuiLibPath(item)
++  if (!libPath) {
++    console.error(`error: libopentui.so not found for target ${name}`)
++    process.exit(1)
++  }
++  await stripNative(libPath)
+   await $`mkdir -p dist/${name}/bin`
+ 
+   const workerPath = "./src/cli/tui/worker.ts"
