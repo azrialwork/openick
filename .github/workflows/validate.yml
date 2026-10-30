@@ -44,6 +44,9 @@ jobs:
       - name: Materialize the pinned release with the delta
         run: ./scripts/materialize.sh "${RUNNER_TEMP}/materialized"
 
+      - name: Install llvm-strip for the native library strip step
+        run: sudo apt-get update && sudo apt-get install -y llvm
+
       - name: Smoke build and smoke run
         run: |
           VERSION="$(jq -r '.version' upstream.json)"
