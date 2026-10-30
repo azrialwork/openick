@@ -59,3 +59,21 @@ A further patch carries the update-feature removal defined in
   and notification, the periodic version check, the `/global/upgrade`
   server endpoint, the installation upgrade functions, and the
   `autoupdate` configuration surface.
+
+Three further patches carry the TUI-and-run-only reduction defined in
+`docs/plan/0005-tui-and-run-only.md`:
+
+- `0009-remove-web-serve-attach.patch` deletes the web, serve, and attach
+  modes: the three commands, the build step that compiled and embedded
+  the web UI, the server's UI catch-all route and hosted-interface proxy
+  fallback, and the `OPENCODE_DISABLE_EMBEDDED_WEB_UI` flag.
+- `0010-remove-acp-github.patch` deletes the ACP editor protocol mode
+  (the `acp` command and the whole protocol module) and the GitHub
+  Actions mode (the `github` command, its handler, and its shared
+  module).
+- `0011-remove-utility-commands.patch` deletes every remaining utility
+  command (providers, account, models, agent, mcp, session, export,
+  import, stats, plugin, db, debug, generate, pr), the yargs completion
+  command, the uninstall command with the orphaned installation service,
+  and the `run` command's `--attach` remote-server path. The CLI surface
+  is now exactly the TUI and `run`.
