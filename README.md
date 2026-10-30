@@ -55,12 +55,11 @@ command, its update checks, and its update notifications are deleted by
 the delta. New versions of the software ship as new Openick releases.
 See `docs/plan/0004-remove-update-upgrade.md`.
 
-The binary ships exactly two entry points: the interactive TUI and
-`opencode run`. Every other upstream mode and command — the web
-interface and its embedded UI, the standalone server, the ACP editor
-protocol, the GitHub Actions agent, and the one-shot management
-commands — is deleted by the delta. See
-`docs/plan/0005-tui-and-run-only.md`.
+The binary's primary entry points are the interactive TUI and
+`opencode run`, accompanied by the upstream one-shot utility commands.
+The web interface and its embedded UI, the standalone server mode, the
+ACP editor protocol, and the GitHub Actions agent are deleted by the
+delta. See `docs/plan/0005-tui-and-run-only.md`.
 
 A patch that no longer applies to a new upstream release blocks the update.
 The pin stays on the previous version, and the workflow opens an issue that
