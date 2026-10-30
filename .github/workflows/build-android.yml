@@ -78,8 +78,10 @@ jobs:
       - name: Build the Android target
         run: |
           cd "${RUNNER_TEMP}/materialized/tree"
+          NDK_HOME="${ANDROID_NDK_HOME:-$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* 2>/dev/null | sort -V | tail -n 1)}"
           OPENCODE_VERSION="${{ steps.pin.outputs.version }}" \
           OPENICK_ANDROID_ASSETS="${RUNNER_TEMP}/android-assets" \
+          OPENICK_STRIP="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
             bun run ./packages/opencode/script/build.ts --android
 
       - name: Verify the artifact identity and package it
