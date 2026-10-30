@@ -75,3 +75,12 @@ Two further patches carry the mode reduction defined in
 A third Plan 0005 patch, `0011-remove-utility-commands.patch`, was
 revoked by the owner on 2026-10-30 and removed from this delta. The
 utility commands it deleted are present in the materialized tree again.
+
+A further patch carries the native library stripping defined in
+`docs/plan/0007-strip-native-libraries.md`; it takes the number the
+revoked patch held:
+
+- `0011-strip-native-libraries.patch` makes the build script strip each
+  target's `libopentui.so` (and the staged Android `librust_pty` library)
+  of symbol and debug data before bundling, under the tool contract of
+  Plan 0007, Locked Decision 4.
