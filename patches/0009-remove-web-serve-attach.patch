@@ -1,0 +1,1108 @@
+Purpose: Delete the web, serve, and attach modes and the embedded web UI (Plan 0005). The opencode web, serve, and attach commands are removed. The build no longer compiles packages/app and never generates or embeds a web UI bundle, for every target including Android. The HTTP API server's catch-all UI route, the UI serving module with its embedded bundle and its app.opencode.ai proxy fallback, and the OPENCODE_DISABLE_EMBEDDED_WEB_UI runtime flag are deleted. The internal server that the TUI and run boot for themselves is not a mode and stays; only its UI route goes. Upstream tests that covered only the deleted surface are removed or trimmed inside this patch.
+Upstream files: packages/opencode/script/build.ts, packages/opencode/src/cli/cmd/attach.ts, packages/opencode/src/cli/cmd/serve.ts, packages/opencode/src/cli/cmd/web.ts, packages/opencode/src/effect/runtime-flags.ts, packages/opencode/src/index.ts, packages/opencode/src/server/routes/instance/httpapi/server.ts, packages/opencode/src/server/shared/ui.ts, packages/opencode/test/cli/serve/serve-process.test.ts, packages/opencode/test/effect/runtime-flags.test.ts, packages/opencode/test/server/httpapi-ui.test.ts
+Rebase note: The coupling points are the CLI entry registrations, the build script's web UI bundle step (deleted wholesale; if upstream restructures the build, keep the invariant that no web UI is compiled or embedded), and the HTTP API server's route composition, where the UI catch-all route is removed and every API route stays.
+
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+index 196a062..fe3be34 100755
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -21,34 +21,8 @@ const baselineFlag = process.argv.includes("--baseline")
+ const skipInstall = process.argv.includes("--skip-install")
+ const sourcemapsFlag = process.argv.includes("--sourcemaps")
+ const plugin = createSolidTransformPlugin()
+-const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
+ const androidFlag = process.argv.includes("--android")
+ 
+-const createEmbeddedWebUIBundle = async () => {
+-  console.log(`Building Web UI to embed in the binary`)
+-  const appDir = path.join(import.meta.dirname, "../../app")
+-  const dist = path.join(appDir, "dist")
+-  await $`OPENCODE_CHANNEL=${Script.channel} bun run --cwd ${appDir} build`
+-  const files = (await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: dist })))
+-    .map((file) => file.replaceAll("\\", "/"))
+-    .filter((file) => !file.endsWith(".map"))
+-    .sort()
+-  const imports = files.map((file, i) => {
+-    const spec = path.relative(dir, path.join(dist, file)).replaceAll("\\", "/")
+-    return `import file_${i} from ${JSON.stringify(spec.startsWith(".") ? spec : `./${spec}`)} with { type: "file" };`
+-  })
+-  const entries = files.map((file, i) => `  ${JSON.stringify(file)}: file_${i},`)
+-  return [
+-    `// Import all files as file_$i with type: "file"`,
+-    ...imports,
+-    `// Export with original mappings`,
+-    `export default {`,
+-    ...entries,
+-    `}`,
+-  ].join("\n")
+-}
+-
+-const embeddedFileMap = skipEmbedWebUi ? null : await createEmbeddedWebUIBundle()
+ const treeSitterWorker = await Bun.file(fileURLToPath(import.meta.resolve("@opentui/core/parser.worker"))).text()
+ 
+ const allTargets: {
+@@ -179,13 +153,11 @@ for (const item of targets) {
+     },
+     files: {
+       [treeSitterWorkerPath]: treeSitterWorker,
+-      ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
+     },
+     entrypoints: [
+       "./src/index.ts",
+       workerPath,
+       treeSitterWorkerPath,
+-      ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
+     ],
+     define: {
+       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
+diff --git a/packages/opencode/src/cli/cmd/attach.ts b/packages/opencode/src/cli/cmd/attach.ts
+deleted file mode 100644
+index 6f5aea6..0000000
+--- a/packages/opencode/src/cli/cmd/attach.ts
++++ /dev/null
+@@ -1,148 +0,0 @@
+-import { cmd } from "./cmd"
+-import { UI } from "@/cli/ui"
+-import { errorMessage } from "@opencode-ai/tui/util/error"
+-import { validateSession } from "../tui/validate-session"
+-import { ServerAuth } from "@/server/auth"
+-
+-export const AttachCommand = cmd({
+-  command: "attach <url>",
+-  describe: "attach to a running opencode server",
+-  builder: (yargs) =>
+-    yargs
+-      .positional("url", {
+-        type: "string",
+-        describe: "http://localhost:4096",
+-        demandOption: true,
+-      })
+-      .option("dir", {
+-        type: "string",
+-        description: "directory to run in",
+-      })
+-      .option("continue", {
+-        alias: ["c"],
+-        describe: "continue the last session",
+-        type: "boolean",
+-      })
+-      .option("session", {
+-        alias: ["s"],
+-        type: "string",
+-        describe: "session id to continue",
+-      })
+-      .option("fork", {
+-        type: "boolean",
+-        describe: "fork the session when continuing (use with --continue or --session)",
+-      })
+-      .option("password", {
+-        alias: ["p"],
+-        type: "string",
+-        describe: "basic auth password (defaults to OPENCODE_SERVER_PASSWORD)",
+-      })
+-      .option("username", {
+-        alias: ["u"],
+-        type: "string",
+-        describe: "basic auth username (defaults to OPENCODE_SERVER_USERNAME or 'opencode')",
+-      })
+-      .option("mini", {
+-        type: "boolean",
+-        describe: "start the minimal interactive interface",
+-        default: false,
+-      })
+-      .option("replay", {
+-        type: "boolean",
+-        hidden: true,
+-      })
+-      .option("no-replay", {
+-        type: "boolean",
+-        describe: "disable mini session history replay on resume and after resize",
+-      })
+-      .option("replay-limit", {
+-        type: "number",
+-        describe: "cap visible mini replay to the newest N messages",
+-      }),
+-  handler: async (args) => {
+-    if (args.replay === true) {
+-      UI.error("--replay is not supported; replay is enabled by default")
+-      process.exitCode = 1
+-      return
+-    }
+-    const noReplay = args.replay === false || args.noReplay === true
+-
+-    const directory = (() => {
+-      if (!args.dir) return undefined
+-      try {
+-        process.chdir(args.dir)
+-        return process.cwd()
+-      } catch {
+-        // If the directory doesn't exist locally (remote attach), pass it through.
+-        return args.dir
+-      }
+-    })()
+-
+-    if (args.mini) {
+-      const { runMini } = await import("./run")
+-      await runMini({
+-        attach: args.url,
+-        directory,
+-        password: args.password,
+-        username: args.username,
+-        continue: args.continue,
+-        session: args.session,
+-        fork: args.fork,
+-        replay: noReplay ? false : undefined,
+-        replayLimit: args.replayLimit,
+-      })
+-      return
+-    }
+-
+-    const unsupported = [
+-      ["--no-replay", noReplay],
+-      ["--replay-limit", args.replayLimit !== undefined],
+-    ].find((entry) => entry[1])?.[0]
+-    if (unsupported) {
+-      UI.error(`${unsupported} requires --mini`)
+-      process.exitCode = 1
+-      return
+-    }
+-
+-    const { TuiConfig } = await import("@/config/tui")
+-    if (args.fork && !args.continue && !args.session) {
+-      UI.error("--fork requires --continue or --session")
+-      process.exitCode = 1
+-      return
+-    }
+-
+-    const headers = ServerAuth.headers({ password: args.password, username: args.username })
+-    const config = await TuiConfig.get()
+-
+-    try {
+-      await validateSession({
+-        url: args.url,
+-        sessionID: args.session,
+-        directory,
+-        headers,
+-      })
+-    } catch (error) {
+-      UI.error(errorMessage(error))
+-      process.exitCode = 1
+-      return
+-    }
+-
+-    const { Effect } = await import("effect")
+-    const { run } = await import("../tui/layer")
+-    const { createLegacyTuiPluginHost } = await import("@/plugin/tui/runtime")
+-    await Effect.runPromise(
+-      run({
+-        url: args.url,
+-        config,
+-        pluginHost: createLegacyTuiPluginHost(),
+-        args: {
+-          continue: args.continue,
+-          sessionID: args.session,
+-          fork: args.fork,
+-        },
+-        directory,
+-        headers,
+-      }),
+-    )
+-  },
+-})
+diff --git a/packages/opencode/src/cli/cmd/serve.ts b/packages/opencode/src/cli/cmd/serve.ts
+deleted file mode 100644
+index c0f62b3..0000000
+--- a/packages/opencode/src/cli/cmd/serve.ts
++++ /dev/null
+@@ -1,24 +0,0 @@
+-import { Effect } from "effect"
+-import { effectCmd } from "../effect-cmd"
+-import { withNetworkOptions, resolveNetworkOptions } from "../network"
+-import { Flag } from "@opencode-ai/core/flag/flag"
+-
+-export const ServeCommand = effectCmd({
+-  command: "serve",
+-  builder: (yargs) => withNetworkOptions(yargs),
+-  describe: "starts a headless opencode server",
+-  // Server loads instances per-request via x-opencode-directory header — no
+-  // need for an ambient project InstanceContext at startup.
+-  instance: false,
+-  handler: Effect.fn("Cli.serve")(function* (args) {
+-    const { Server } = yield* Effect.promise(() => import("../../server/server"))
+-    if (!Flag.OPENCODE_SERVER_PASSWORD) {
+-      console.log("Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.")
+-    }
+-    const opts = yield* resolveNetworkOptions(args)
+-    const server = yield* Effect.promise(() => Server.listen(opts))
+-    console.log(`opencode server listening on http://${server.hostname}:${server.port}`)
+-
+-    yield* Effect.never
+-  }),
+-})
+diff --git a/packages/opencode/src/cli/cmd/web.ts b/packages/opencode/src/cli/cmd/web.ts
+deleted file mode 100644
+index 8842b7c..0000000
+--- a/packages/opencode/src/cli/cmd/web.ts
++++ /dev/null
+@@ -1,84 +0,0 @@
+-import { Effect } from "effect"
+-import { UI } from "../ui"
+-import { effectCmd } from "../effect-cmd"
+-import { withNetworkOptions, resolveNetworkOptions } from "../network"
+-import { Flag } from "@opencode-ai/core/flag/flag"
+-import { openUrl } from "@opencode-ai/core/open"
+-import { networkInterfaces } from "os"
+-
+-function getNetworkIPs() {
+-  const nets = networkInterfaces()
+-  const results: string[] = []
+-
+-  for (const name of Object.keys(nets)) {
+-    const net = nets[name]
+-    if (!net) continue
+-
+-    for (const netInfo of net) {
+-      // Skip internal and non-IPv4 addresses
+-      if (netInfo.internal || netInfo.family !== "IPv4") continue
+-
+-      // Skip Docker bridge networks (typically 172.x.x.x)
+-      if (netInfo.address.startsWith("172.")) continue
+-
+-      results.push(netInfo.address)
+-    }
+-  }
+-
+-  return results
+-}
+-
+-export const WebCommand = effectCmd({
+-  command: "web",
+-  builder: (yargs) => withNetworkOptions(yargs),
+-  describe: "start opencode server and open web interface",
+-  // Server loads instances per-request via x-opencode-directory header — no
+-  // ambient project InstanceContext needed at startup.
+-  instance: false,
+-  handler: Effect.fn("Cli.web")(function* (args) {
+-    const { Server } = yield* Effect.promise(() => import("../../server/server"))
+-    if (!Flag.OPENCODE_SERVER_PASSWORD) {
+-      UI.println(UI.Style.TEXT_WARNING_BOLD + "!  OPENCODE_SERVER_PASSWORD is not set; server is unsecured.")
+-    }
+-    const opts = yield* resolveNetworkOptions(args)
+-    const server = yield* Effect.promise(() => Server.listen(opts))
+-    UI.empty()
+-    UI.println(UI.logo("  "))
+-    UI.empty()
+-
+-    if (opts.hostname === "0.0.0.0") {
+-      // Show localhost for local access
+-      const localhostUrl = `http://localhost:${server.port}`
+-      UI.println(UI.Style.TEXT_INFO_BOLD + "  Local access:      ", UI.Style.TEXT_NORMAL, localhostUrl)
+-
+-      // Show network IPs for remote access
+-      const networkIPs = getNetworkIPs()
+-      if (networkIPs.length > 0) {
+-        for (const ip of networkIPs) {
+-          UI.println(
+-            UI.Style.TEXT_INFO_BOLD + "  Network access:    ",
+-            UI.Style.TEXT_NORMAL,
+-            `http://${ip}:${server.port}`,
+-          )
+-        }
+-      }
+-
+-      if (opts.mdns) {
+-        UI.println(
+-          UI.Style.TEXT_INFO_BOLD + "  mDNS:              ",
+-          UI.Style.TEXT_NORMAL,
+-          `${opts.mdnsDomain}:${server.port}`,
+-        )
+-      }
+-
+-      // Open localhost in browser
+-      openUrl(localhostUrl).catch(() => {})
+-    } else {
+-      const displayUrl = server.url.toString()
+-      UI.println(UI.Style.TEXT_INFO_BOLD + "  Web interface:    ", UI.Style.TEXT_NORMAL, displayUrl)
+-      openUrl(displayUrl).catch(() => {})
+-    }
+-
+-    yield* Effect.never
+-  }),
+-})
+diff --git a/packages/opencode/src/effect/runtime-flags.ts b/packages/opencode/src/effect/runtime-flags.ts
+index 65e02f0..b9ee240 100644
+--- a/packages/opencode/src/effect/runtime-flags.ts
++++ b/packages/opencode/src/effect/runtime-flags.ts
+@@ -17,7 +17,6 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
+   autoShare: bool("OPENCODE_AUTO_SHARE"),
+   pure: bool("OPENCODE_PURE"),
+   disableDefaultPlugins: bool("OPENCODE_DISABLE_DEFAULT_PLUGINS"),
+-  disableEmbeddedWebUi: bool("OPENCODE_DISABLE_EMBEDDED_WEB_UI"),
+   disableExternalSkills: bool("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
+   disableLspDownload: bool("OPENCODE_DISABLE_LSP_DOWNLOAD"),
+   disableClaudeCodePrompt: Config.all({
+diff --git a/packages/opencode/src/index.ts b/packages/opencode/src/index.ts
+index 657c7b5..9edf91d 100644
+--- a/packages/opencode/src/index.ts
++++ b/packages/opencode/src/index.ts
+@@ -10,18 +10,15 @@ import { ModelsCommand } from "./cli/cmd/models"
+ import { UI } from "./cli/ui"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
+ import { FormatError } from "./cli/error"
+-import { ServeCommand } from "./cli/cmd/serve"
+ import { DebugCommand } from "./cli/cmd/debug"
+ import { StatsCommand } from "./cli/cmd/stats"
+ import { McpCommand } from "./cli/cmd/mcp"
+ import { GithubCommand } from "./cli/cmd/github"
+ import { ExportCommand } from "./cli/cmd/export"
+ import { ImportCommand } from "./cli/cmd/import"
+-import { AttachCommand } from "./cli/cmd/attach"
+ import { TuiThreadCommand } from "./cli/cmd/tui"
+ import { AcpCommand } from "./cli/cmd/acp"
+ import { EOL } from "os"
+-import { WebCommand } from "./cli/cmd/web"
+ import { PrCommand } from "./cli/cmd/pr"
+ import { SessionCommand } from "./cli/cmd/session"
+ import { DbCommand } from "./cli/cmd/db"
+@@ -80,7 +77,6 @@ const cli = yargs(args)
+   .command(AcpCommand)
+   .command(McpCommand)
+   .command(TuiThreadCommand)
+-  .command(AttachCommand)
+   .command(RunCommand)
+   .command(GenerateCommand)
+   .command(DebugCommand)
+@@ -88,8 +84,6 @@ const cli = yargs(args)
+   .command(ProvidersCommand)
+   .command(AgentCommand)
+   .command(UninstallCommand)
+-  .command(ServeCommand)
+-  .command(WebCommand)
+   .command(ModelsCommand)
+   .command(StatsCommand)
+   .command(ExportCommand)
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/server.ts b/packages/opencode/src/server/routes/instance/httpapi/server.ts
+index 94555ca..1112d34 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/server.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/server.ts
+@@ -67,7 +67,6 @@ import { SessionExecution } from "@opencode-ai/core/session/execution"
+ import * as SessionExecutionLocal from "@opencode-ai/core/session/execution/local"
+ import { lazy } from "@/util/lazy"
+ import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@opencode-ai/server/cors"
+-import { serveUIEffect } from "@/server/shared/ui"
+ import { ServerAuth } from "@/server/auth"
+ import { InstanceHttpApi, RootHttpApi } from "./api"
+ import { Api } from "@opencode-ai/server/api"
+@@ -131,7 +130,6 @@ const cors = (corsOptions?: CorsOptions) =>
+ // - eventApiRoutes: typed SSE route with instance routing context and its existing API contract.
+ // - ptyConnectApiRoutes: typed WebSocket upgrade route with ticket-aware auth.
+ // - instanceApiRoutes: remaining typed instance routes.
+-// - uiRoute: raw catch-all fallback; auth is router middleware so public static assets can bypass it.
+ const authOnlyRouterLayer = authorizationRouterMiddleware.layer.pipe(Layer.provide(ServerAuth.Config.layer))
+ const httpApiAuthLayer = authorizationLayer.pipe(Layer.provide(ServerAuth.Config.layer))
+ const ptyConnectHttpApiAuthLayer = ptyConnectAuthorizationLayer.pipe(Layer.provide(ServerAuth.Config.layer))
+@@ -190,17 +188,6 @@ const docRoute = HttpRouter.use((router) => router.add("GET", "/doc", () => Effe
+   Layer.provide(authOnlyRouterLayer),
+ )
+ 
+-const uiRoute = HttpRouter.use((router) =>
+-  Effect.gen(function* () {
+-    const fs = yield* FSUtil.Service
+-    const client = yield* HttpClient.HttpClient
+-    const flags = yield* RuntimeFlags.Service
+-    yield* router.add("*", "/*", (request) =>
+-      serveUIEffect(request, { fs, client, disableEmbeddedWebUi: flags.disableEmbeddedWebUi }),
+-    )
+-  }),
+-).pipe(Layer.provide(authOnlyRouterLayer))
+-
+ type RouteRequirements =
+   | HttpRouter.HttpRouter
+   | HttpRouter.Request<"Error", unknown>
+@@ -278,7 +265,6 @@ export function createRoutes(
+     instanceRoutes,
+     serverRoutes,
+     docRoute,
+-    uiRoute,
+   ).pipe(
+     Layer.provide([
+       errorLayer,
+diff --git a/packages/opencode/src/server/shared/ui.ts b/packages/opencode/src/server/shared/ui.ts
+deleted file mode 100644
+index e0e3371..0000000
+--- a/packages/opencode/src/server/shared/ui.ts
++++ /dev/null
+@@ -1,107 +0,0 @@
+-import { FSUtil } from "@opencode-ai/core/fs-util"
+-import { Effect, Stream } from "effect"
+-import { HttpBody, HttpClient, HttpClientRequest, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
+-import { createHash } from "node:crypto"
+-import { ProxyUtil } from "../proxy-util"
+-
+-let embeddedUIPromise: Promise<Record<string, string> | null> | undefined
+-
+-export const UI_UPSTREAM = new URL("https://app.opencode.ai")
+-
+-export const csp = (hash = "") =>
+-  `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'${hash ? ` 'sha256-${hash}'` : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; media-src 'self' data:; connect-src * data: blob:`
+-
+-export function themePreloadHash(body: string) {
+-  return body.match(/<script\b(?![^>]*\bsrc\s*=)[^>]*\bid=(['"])oc-theme-preload-script\1[^>]*>([\s\S]*?)<\/script>/i)
+-}
+-
+-export function cspForHtml(body: string) {
+-  const match = themePreloadHash(body)
+-  return csp(match ? createHash("sha256").update(match[2]).digest("base64") : "")
+-}
+-
+-function requestBody(request: HttpServerRequest.HttpServerRequest) {
+-  if (request.method === "GET" || request.method === "HEAD") return HttpBody.empty
+-  const len = request.headers["content-length"]
+-  return HttpBody.stream(request.stream, request.headers["content-type"], len === undefined ? undefined : Number(len))
+-}
+-
+-function proxyResponseHeaders(headers: Record<string, string>) {
+-  const result = new Headers(headers)
+-  // FetchHttpClient exposes decoded response bodies, so forwarding upstream
+-  // transfer metadata makes browsers decode already-decoded assets again.
+-  result.delete("content-encoding")
+-  result.delete("content-length")
+-  result.delete("transfer-encoding")
+-  return result
+-}
+-
+-export function upstreamURL(path: string) {
+-  return new URL(path, UI_UPSTREAM).toString()
+-}
+-
+-export function embeddedUI(disableEmbeddedWebUi: boolean) {
+-  if (disableEmbeddedWebUi) return Promise.resolve(null)
+-  return (embeddedUIPromise ??=
+-    // @ts-expect-error - generated file at build time
+-    import("opencode-web-ui.gen.ts").then((module) => module.default as Record<string, string>).catch(() => null))
+-}
+-
+-function notFound() {
+-  return HttpServerResponse.jsonUnsafe({ error: "Not Found" }, { status: 404 })
+-}
+-
+-function embeddedUIResponse(file: string, body: Uint8Array) {
+-  const mime = FSUtil.mimeType(file)
+-  const headers = new Headers({ "content-type": mime })
+-  if (mime.startsWith("text/html")) {
+-    headers.set("content-security-policy", cspForHtml(new TextDecoder().decode(body)))
+-  }
+-  return HttpServerResponse.raw(body, { headers })
+-}
+-
+-export function serveEmbeddedUIEffect(
+-  requestPath: string,
+-  fs: FSUtil.Interface,
+-  embeddedWebUI: Record<string, string>,
+-) {
+-  const file = embeddedWebUI[requestPath.replace(/^\//, "")] ?? embeddedWebUI["index.html"] ?? null
+-  if (!file) return Effect.succeed(notFound())
+-
+-  return fs.readFile(file).pipe(
+-    Effect.map((body) => embeddedUIResponse(file, body)),
+-    Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(notFound())),
+-  )
+-}
+-
+-export function serveUIEffect(
+-  request: HttpServerRequest.HttpServerRequest,
+-  services: { fs: FSUtil.Interface; client: HttpClient.HttpClient; disableEmbeddedWebUi: boolean },
+-) {
+-  return Effect.gen(function* () {
+-    const embeddedWebUI = yield* Effect.promise(() => embeddedUI(services.disableEmbeddedWebUi))
+-    const path = new URL(request.url, "http://localhost").pathname
+-
+-    if (embeddedWebUI) return yield* serveEmbeddedUIEffect(path, services.fs, embeddedWebUI)
+-
+-    const response = yield* services.client.execute(
+-      HttpClientRequest.make(request.method)(upstreamURL(path), {
+-        headers: ProxyUtil.headers(request.headers, { host: UI_UPSTREAM.host }),
+-        body: requestBody(request),
+-      }),
+-    )
+-    const headers = proxyResponseHeaders(response.headers)
+-
+-    if (response.headers["content-type"]?.includes("text/html")) {
+-      const body = yield* response.text
+-      headers.set("Content-Security-Policy", cspForHtml(body))
+-      return HttpServerResponse.text(body, { status: response.status, headers })
+-    }
+-
+-    headers.set("Content-Security-Policy", csp())
+-    return HttpServerResponse.stream(response.stream.pipe(Stream.catchCause(() => Stream.empty)), {
+-      status: response.status,
+-      headers,
+-    })
+-  })
+-}
+diff --git a/packages/opencode/test/cli/serve/serve-process.test.ts b/packages/opencode/test/cli/serve/serve-process.test.ts
+deleted file mode 100644
+index 6dbea37..0000000
+--- a/packages/opencode/test/cli/serve/serve-process.test.ts
++++ /dev/null
+@@ -1,61 +0,0 @@
+-// Subprocess integration tests for `opencode serve`. Spawns the real CLI in
+-// headless mode and exercises it over HTTP — this is the only test tier that
+-// catches bugs spanning argv → server boot → routing → instance loading.
+-//
+-// `serve` is long-lived: the harness returns a handle (url/port/kill/exited)
+-// and kills the process when the test scope closes. The OS-assigned port is
+-// parsed off the "listening on http://..." line.
+-import { describe, expect } from "bun:test"
+-import { Effect } from "effect"
+-import { HttpClient } from "effect/unstable/http"
+-import { cliIt } from "../../lib/cli-process"
+-
+-describe("opencode serve (subprocess)", () => {
+-  // Smoke test: server starts, binds a port, and /global/health responds.
+-  // If this fails, all other serve tests likely will too — debug here first.
+-  cliIt.live(
+-    "starts, binds a port, and serves /global/health",
+-    ({ opencode }) =>
+-      Effect.gen(function* () {
+-        const server = yield* opencode.serve()
+-        expect(server.port).toBeGreaterThan(0)
+-        expect(server.url).toMatch(/^http:\/\//)
+-
+-        const client = yield* HttpClient.HttpClient
+-        const res = yield* client.get(`${server.url}/global/health`)
+-        expect(res.status).toBe(200)
+-        // GlobalHealth schema is { success: true, ... } | { success: false, error }.
+-        // We don't lock in further shape here — any 200 with parseable JSON is
+-        // enough proof the routing + auth-bypass + instance loading is alive.
+-        const body = yield* res.json
+-        expect(body).toBeDefined()
+-      }),
+-    60_000,
+-  )
+-
+-  // The scope-close finalizer must actually terminate the child. Without this
+-  // test a regression in the kill path (e.g. a future refactor that forgets
+-  // to wire the finalizer) would leak processes on every test run.
+-  cliIt.live(
+-    "kills the subprocess on scope close",
+-    ({ opencode }) =>
+-      Effect.gen(function* () {
+-        // Inner scope so we can observe `.exited` resolving after it closes.
+-        const exitedPromise = yield* Effect.scoped(
+-          Effect.gen(function* () {
+-            const server = yield* opencode.serve()
+-            // Capture the Promise, not the resolved value — scope closes after
+-            // this gen returns, at which point the finalizer kills the child.
+-            return server.exited
+-          }),
+-        )
+-        // After scope close: finalizer fired, process must have exited.
+-        const code = yield* Effect.promise(() => exitedPromise)
+-        // Bun reports the exit code; SIGTERM-killed processes return non-null
+-        // (typically 143 on POSIX). We just require resolution within a sane
+-        // window — anything else means the kill didn't take.
+-        expect(typeof code === "number" || code === null).toBe(true)
+-      }),
+-    60_000,
+-  )
+-})
+diff --git a/packages/opencode/test/effect/runtime-flags.test.ts b/packages/opencode/test/effect/runtime-flags.test.ts
+index ca5ca1d..91134fa 100644
+--- a/packages/opencode/test/effect/runtime-flags.test.ts
++++ b/packages/opencode/test/effect/runtime-flags.test.ts
+@@ -26,7 +26,6 @@ describe("RuntimeFlags", () => {
+             OPENCODE_PURE: "true",
+             OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+             OPENCODE_AUTO_SHARE: "true",
+-            OPENCODE_DISABLE_EMBEDDED_WEB_UI: "true",
+             OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
+             OPENCODE_DISABLE_LSP_DOWNLOAD: "true",
+             OPENCODE_EXPERIMENTAL: "true",
+@@ -42,7 +41,6 @@ describe("RuntimeFlags", () => {
+       expect(flags.pure).toBe(true)
+       expect(flags.autoShare).toBe(true)
+       expect(flags.disableDefaultPlugins).toBe(true)
+-      expect(flags.disableEmbeddedWebUi).toBe(true)
+       expect(flags.disableExternalSkills).toBe(true)
+       expect(flags.disableLspDownload).toBe(true)
+       expect(flags.disableClaudeCodePrompt).toBe(false)
+@@ -108,7 +106,6 @@ describe("RuntimeFlags", () => {
+       expect(flags.pure).toBe(false)
+       expect(flags.autoShare).toBe(false)
+       expect(flags.disableDefaultPlugins).toBe(true)
+-      expect(flags.disableEmbeddedWebUi).toBe(false)
+       expect(flags.disableExternalSkills).toBe(false)
+       expect(flags.disableLspDownload).toBe(false)
+       expect(flags.disableClaudeCodePrompt).toBe(false)
+@@ -334,7 +331,6 @@ describe("RuntimeFlags", () => {
+ 
+       expect(flags.pure).toBe(false)
+       expect(flags.disableDefaultPlugins).toBe(false)
+-      expect(flags.disableEmbeddedWebUi).toBe(false)
+       expect(flags.disableExternalSkills).toBe(false)
+       expect(flags.disableLspDownload).toBe(false)
+       expect(flags.disableClaudeCodePrompt).toBe(false)
+diff --git a/packages/opencode/test/server/httpapi-ui.test.ts b/packages/opencode/test/server/httpapi-ui.test.ts
+deleted file mode 100644
+index 1a7ccc6..0000000
+--- a/packages/opencode/test/server/httpapi-ui.test.ts
++++ /dev/null
+@@ -1,457 +0,0 @@
+-import { createHash } from "node:crypto"
+-import { describe, expect } from "bun:test"
+-import { Flag } from "@opencode-ai/core/flag/flag"
+-import { ConfigProvider, Effect, Layer, Option } from "effect"
+-import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+-import {
+-  HttpClient,
+-  HttpClientRequest,
+-  HttpClientResponse,
+-  HttpRouter,
+-  HttpServer,
+-  HttpServerRequest,
+-  HttpServerResponse,
+-} from "effect/unstable/http"
+-import { FSUtil } from "@opencode-ai/core/fs-util"
+-import { RuntimeFlags } from "../../src/effect/runtime-flags"
+-import { ServerAuth } from "../../src/server/auth"
+-import { authorizationRouterMiddleware } from "../../src/server/routes/instance/httpapi/middleware/authorization"
+-import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
+-import { serveEmbeddedUIEffect, serveUIEffect } from "../../src/server/shared/ui"
+-import { testEffect } from "../lib/effect"
+-
+-const testStateLayer = Layer.effectDiscard(
+-  Effect.gen(function* () {
+-    const original = {
+-      OPENCODE_SERVER_PASSWORD: Flag.OPENCODE_SERVER_PASSWORD,
+-      OPENCODE_SERVER_USERNAME: Flag.OPENCODE_SERVER_USERNAME,
+-      envPassword: process.env.OPENCODE_SERVER_PASSWORD,
+-      envUsername: process.env.OPENCODE_SERVER_USERNAME,
+-    }
+-
+-    yield* Effect.addFinalizer(() =>
+-      Effect.sync(() => {
+-        Flag.OPENCODE_SERVER_PASSWORD = original.OPENCODE_SERVER_PASSWORD
+-        Flag.OPENCODE_SERVER_USERNAME = original.OPENCODE_SERVER_USERNAME
+-        restoreEnv("OPENCODE_SERVER_PASSWORD", original.envPassword)
+-        restoreEnv("OPENCODE_SERVER_USERNAME", original.envUsername)
+-      }),
+-    )
+-  }),
+-)
+-
+-const fsUtilLayer = AppNodeBuilder.build(FSUtil.node)
+-const it = testEffect(Layer.mergeAll(testStateLayer, fsUtilLayer, RuntimeFlags.layer()))
+-
+-function authConfigLayer(input?: { password?: string; username?: string }) {
+-  return ServerAuth.Config.configLayer({
+-    password: input?.password === undefined ? Option.none() : Option.some(input.password),
+-    username: input?.username ?? "opencode",
+-  })
+-}
+-
+-function restoreEnv(key: string, value: string | undefined) {
+-  if (value === undefined) {
+-    delete process.env[key]
+-    return
+-  }
+-  process.env[key] = value
+-}
+-
+-function app(input?: { password?: string; username?: string }) {
+-  const handler = HttpRouter.toWebHandler(
+-    HttpApiApp.routes.pipe(
+-      Layer.provide(
+-        ConfigProvider.layer(
+-          ConfigProvider.fromUnknown({
+-            OPENCODE_SERVER_PASSWORD: input?.password,
+-            OPENCODE_SERVER_USERNAME: input?.username,
+-          }),
+-        ),
+-      ),
+-    ),
+-    { disableLogger: true },
+-  ).handler
+-  return {
+-    request(input: string | URL | Request, init?: RequestInit) {
+-      return Effect.promise(() =>
+-        Promise.resolve(
+-          handler(
+-            input instanceof Request ? input : new Request(new URL(input, "http://localhost"), init),
+-            HttpApiApp.context,
+-          ),
+-        ),
+-      )
+-    },
+-  }
+-}
+-
+-function uiApp(input?: {
+-  password?: string
+-  username?: string
+-  client?: Layer.Layer<HttpClient.HttpClient>
+-  disableEmbeddedWebUi?: boolean
+-}) {
+-  const handler = HttpRouter.toWebHandler(
+-    HttpRouter.use((router) =>
+-      Effect.gen(function* () {
+-        const fs = yield* FSUtil.Service
+-        const client = yield* HttpClient.HttpClient
+-        const flags = yield* RuntimeFlags.Service
+-        yield* router.add("*", "/*", (request) =>
+-          serveUIEffect(request, { fs, client, disableEmbeddedWebUi: flags.disableEmbeddedWebUi }),
+-        )
+-      }),
+-    ).pipe(
+-      Layer.provide(authorizationRouterMiddleware.layer.pipe(Layer.provide(authConfigLayer(input)))),
+-      Layer.provide([
+-        fsUtilLayer,
+-        input?.client ?? httpClient(new Response("ui")),
+-        RuntimeFlags.layer({ disableEmbeddedWebUi: input?.disableEmbeddedWebUi ?? false }),
+-        HttpServer.layerServices,
+-      ]),
+-    ),
+-    { disableLogger: true },
+-  ).handler
+-  return {
+-    request(input: string | URL | Request, init?: RequestInit) {
+-      return Effect.promise(() =>
+-        Promise.resolve(
+-          handler(
+-            input instanceof Request ? input : new Request(new URL(input, "http://localhost"), init),
+-            HttpApiApp.context,
+-          ),
+-        ),
+-      )
+-    },
+-  }
+-}
+-
+-function routeOrderingApp() {
+-  let proxiedUrl: string | undefined
+-  const handler = HttpRouter.toWebHandler(
+-    HttpRouter.use((router) =>
+-      Effect.gen(function* () {
+-        const fs = yield* FSUtil.Service
+-        const client = yield* HttpClient.HttpClient
+-        const flags = yield* RuntimeFlags.Service
+-        yield* router.add("GET", "/session/:sessionID", () =>
+-          Effect.succeed(HttpServerResponse.jsonUnsafe({ error: "Not Found" }, { status: 404 })),
+-        )
+-        yield* router.add("*", "/*", (request) =>
+-          serveUIEffect(request, { fs, client, disableEmbeddedWebUi: flags.disableEmbeddedWebUi }),
+-        )
+-      }),
+-    ).pipe(
+-      Layer.provide([
+-        fsUtilLayer,
+-        RuntimeFlags.layer({ disableEmbeddedWebUi: true }),
+-        httpClient(new Response("ui"), (request) => {
+-          proxiedUrl = request.url
+-        }),
+-        HttpServer.layerServices,
+-      ]),
+-    ),
+-    { disableLogger: true },
+-  ).handler
+-  return {
+-    proxiedUrl: () => proxiedUrl,
+-    request(input: string | URL | Request, init?: RequestInit) {
+-      return Effect.promise(() =>
+-        Promise.resolve(
+-          handler(
+-            input instanceof Request ? input : new Request(new URL(input, "http://localhost"), init),
+-            HttpApiApp.context,
+-          ),
+-        ),
+-      )
+-    },
+-  }
+-}
+-
+-function httpClient(response: Response, onRequest?: (request: HttpClientRequest.HttpClientRequest) => void) {
+-  return Layer.succeed(
+-    HttpClient.HttpClient,
+-    HttpClient.make((request) => {
+-      onRequest?.(request)
+-      return Effect.succeed(HttpClientResponse.fromWeb(request, response))
+-    }),
+-  )
+-}
+-
+-function responseText(response: Response) {
+-  return Effect.promise(() => response.text())
+-}
+-
+-describe("HttpApi UI fallback", () => {
+-  it.live("serves the web UI through the HTTP API app", () =>
+-    Effect.gen(function* () {
+-      let proxiedUrl: string | undefined
+-
+-      const response = yield* uiApp({
+-        disableEmbeddedWebUi: true,
+-        client: httpClient(
+-          new Response("<html>opencode</html>", { headers: { "content-type": "text/html" } }),
+-          (request) => {
+-            proxiedUrl = request.url
+-          },
+-        ),
+-      }).request("/")
+-
+-      expect(response.status).toBe(200)
+-      expect(response.headers.get("content-type")).toContain("text/html")
+-      expect(yield* responseText(response)).toBe("<html>opencode</html>")
+-      expect(proxiedUrl).toBe("https://app.opencode.ai/")
+-    }),
+-  )
+-
+-  it.live("strips upstream transfer encoding headers from proxied assets", () =>
+-    Effect.gen(function* () {
+-      let proxiedUrl: string | undefined
+-
+-      const response = yield* Effect.gen(function* () {
+-        const fs = yield* FSUtil.Service
+-        const client = yield* HttpClient.HttpClient
+-        const flags = yield* RuntimeFlags.Service
+-        return yield* serveUIEffect(HttpServerRequest.fromWeb(new Request("http://localhost/assets/app.js")), {
+-          fs,
+-          client,
+-          disableEmbeddedWebUi: flags.disableEmbeddedWebUi,
+-        })
+-      }).pipe(
+-        Effect.provide(
+-          Layer.mergeAll(
+-            RuntimeFlags.layer({ disableEmbeddedWebUi: true }),
+-            Layer.succeed(
+-              HttpClient.HttpClient,
+-              HttpClient.make((request) => {
+-                proxiedUrl = request.url
+-                return Effect.succeed(
+-                  HttpClientResponse.fromWeb(
+-                    request,
+-                    new Response("console.log('ok')", {
+-                      headers: {
+-                        "content-encoding": "br",
+-                        "content-length": "999",
+-                        "content-type": "text/javascript",
+-                      },
+-                    }),
+-                  ),
+-                )
+-              }),
+-            ),
+-          ),
+-        ),
+-        Effect.map(HttpServerResponse.toWeb),
+-      )
+-
+-      expect(response.status).toBe(200)
+-      expect(proxiedUrl).toBe("https://app.opencode.ai/assets/app.js")
+-      expect(response.headers.get("content-encoding")).toBeNull()
+-      expect(response.headers.get("content-length")).not.toBe("999")
+-      expect(response.headers.get("content-type")).toContain("text/javascript")
+-      expect(yield* responseText(response)).toBe("console.log('ok')")
+-    }),
+-  )
+-
+-  // Regression for #25698 (Ope): upstream `transfer-encoding: chunked` was
+-  // forwarded through the proxy while the proxy itself re-frames the body,
+-  // causing browsers to fail with `ERR_INVALID_CHUNKED_ENCODING`.
+-  it.live("strips upstream transfer-encoding header from proxied assets", () =>
+-    Effect.gen(function* () {
+-      const response = yield* Effect.gen(function* () {
+-        const fs = yield* FSUtil.Service
+-        const client = yield* HttpClient.HttpClient
+-        const flags = yield* RuntimeFlags.Service
+-        return yield* serveUIEffect(HttpServerRequest.fromWeb(new Request("http://localhost/")), {
+-          fs,
+-          client,
+-          disableEmbeddedWebUi: flags.disableEmbeddedWebUi,
+-        })
+-      }).pipe(
+-        Effect.provide(
+-          Layer.mergeAll(
+-            RuntimeFlags.layer({ disableEmbeddedWebUi: true }),
+-            Layer.succeed(
+-              HttpClient.HttpClient,
+-              HttpClient.make((request) =>
+-                Effect.succeed(
+-                  HttpClientResponse.fromWeb(
+-                    request,
+-                    new Response("<html>opencode</html>", {
+-                      headers: {
+-                        "transfer-encoding": "chunked",
+-                        "content-type": "text/html",
+-                      },
+-                    }),
+-                  ),
+-                ),
+-              ),
+-            ),
+-          ),
+-        ),
+-        Effect.map(HttpServerResponse.toWeb),
+-      )
+-
+-      expect(response.status).toBe(200)
+-      expect(response.headers.get("transfer-encoding")).toBeNull()
+-      expect(yield* responseText(response)).toBe("<html>opencode</html>")
+-    }),
+-  )
+-
+-  it.live("serves embedded UI assets when Bun can read them but access reports missing", () =>
+-    Effect.gen(function* () {
+-      let readPath: string | undefined
+-
+-      const fs = yield* FSUtil.Service
+-      const response = yield* serveEmbeddedUIEffect(
+-        "/assets/app.js",
+-        {
+-          ...fs,
+-          existsSafe: () => Effect.die("embedded UI should not rely on filesystem access checks"),
+-          readFile: (path) => {
+-            readPath = path
+-            return path === "/$bunfs/root/assets/app.js"
+-              ? Effect.succeed(new TextEncoder().encode("console.log('embedded')"))
+-              : Effect.die(`unexpected embedded UI path: ${path}`)
+-          },
+-        },
+-        { "assets/app.js": "/$bunfs/root/assets/app.js" },
+-      ).pipe(Effect.map(HttpServerResponse.toWeb))
+-
+-      expect(response.status).toBe(200)
+-      expect(readPath).toBe("/$bunfs/root/assets/app.js")
+-      expect(response.headers.get("content-type")).toContain("text/javascript")
+-      expect(yield* responseText(response)).toBe("console.log('embedded')")
+-    }),
+-  )
+-
+-  it.live("allows embedded UI terminal wasm, blob attachments, and theme preload CSP", () =>
+-    Effect.gen(function* () {
+-      const script = 'document.documentElement.dataset.theme = "dark"'
+-
+-      const fs = yield* FSUtil.Service
+-      const response = yield* serveEmbeddedUIEffect(
+-        "/",
+-        {
+-          ...fs,
+-          readFile: (path) => {
+-            return path === "/$bunfs/root/index.html"
+-              ? Effect.succeed(
+-                  new TextEncoder().encode(
+-                    `<html><head><script id="oc-theme-preload-script">${script}</script></head></html>`,
+-                  ),
+-                )
+-              : Effect.die(`unexpected embedded UI path: ${path}`)
+-          },
+-        },
+-        { "index.html": "/$bunfs/root/index.html" },
+-      ).pipe(Effect.map(HttpServerResponse.toWeb))
+-
+-      const csp = response.headers.get("content-security-policy") ?? ""
+-      expect(csp).toContain("script-src 'self' 'wasm-unsafe-eval'")
+-      expect(csp).toContain(`'sha256-${createHash("sha256").update(script).digest("base64")}'`)
+-      expect(csp).toContain("img-src 'self' data: https: blob:")
+-      expect(csp).toContain("connect-src * data: blob:")
+-    }),
+-  )
+-
+-  it.live("keeps matched API routes ahead of the UI fallback", () =>
+-    Effect.gen(function* () {
+-      const server = routeOrderingApp()
+-      const response = yield* server.request("/session/ses_nope")
+-
+-      expect(response.status).toBe(404)
+-      expect(server.proxiedUrl()).toBeUndefined()
+-    }),
+-  )
+-
+-  it.live("requires server password for the web UI", () =>
+-    Effect.gen(function* () {
+-      const response = yield* uiApp({
+-        password: "secret",
+-        username: "opencode",
+-        disableEmbeddedWebUi: true,
+-      }).request("/")
+-
+-      expect(response.status).toBe(401)
+-      expect(response.headers.get("www-authenticate")).toBe('Basic realm="Secure Area"')
+-    }),
+-  )
+-
+-  it.live("accepts auth token for the web UI", () =>
+-    Effect.gen(function* () {
+-      const response = yield* uiApp({
+-        password: "secret",
+-        username: "opencode",
+-        disableEmbeddedWebUi: true,
+-        client: httpClient(new Response("<html>opencode</html>", { headers: { "content-type": "text/html" } })),
+-      }).request(`/?auth_token=${btoa("opencode:secret")}`)
+-
+-      expect(response.status).toBe(200)
+-      expect(yield* responseText(response)).toBe("<html>opencode</html>")
+-    }),
+-  )
+-
+-  it.live("accepts basic auth for the web UI", () =>
+-    Effect.gen(function* () {
+-      const response = yield* uiApp({
+-        password: "secret",
+-        username: "opencode",
+-        disableEmbeddedWebUi: true,
+-      }).request("/", {
+-        headers: { authorization: `Basic ${btoa("opencode:secret")}` },
+-      })
+-
+-      expect(response.status).toBe(200)
+-    }),
+-  )
+-
+-  it.live("accepts basic auth passwords containing colons for the web UI", () =>
+-    Effect.gen(function* () {
+-      const response = yield* uiApp({
+-        password: "sec:ret",
+-        username: "opencode",
+-        disableEmbeddedWebUi: true,
+-      }).request("/", {
+-        headers: { authorization: `Basic ${btoa("opencode:sec:ret")}` },
+-      })
+-
+-      expect(response.status).toBe(200)
+-    }),
+-  )
+-
+-  // Regression for #25698 (Ope): the browser fetches the PWA manifest and
+-  // its icons via flows that don't carry app-managed credentials (the
+-  // `<link rel="manifest">` request is not under page-auth control), so the
+-  // server returning 401 breaks PWA install. These specific public assets
+-  // should bypass auth.
+-  it.live("serves the PWA manifest without auth even when a server password is set", () =>
+-    Effect.gen(function* () {
+-      for (const path of ["/site.webmanifest", "/web-app-manifest-192x192.png", "/web-app-manifest-512x512.png"]) {
+-        const response = yield* uiApp({
+-          password: "secret",
+-          username: "opencode",
+-          disableEmbeddedWebUi: true,
+-          client: httpClient(new Response("ok")),
+-        }).request(path)
+-        expect(response.status).not.toBe(401)
+-      }
+-    }),
+-  )
+-
+-  it.live("allows web UI preflight without auth", () =>
+-    Effect.gen(function* () {
+-      const response = yield* app({ password: "secret", username: "opencode" }).request("/", {
+-        method: "OPTIONS",
+-        headers: {
+-          origin: "http://localhost:3000",
+-          "access-control-request-method": "GET",
+-        },
+-      })
+-
+-      expect(response.status).toBe(204)
+-      expect(response.headers.get("access-control-allow-origin")).toBe("http://localhost:3000")
+-    }),
+-  )
+-})
