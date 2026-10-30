@@ -73,6 +73,10 @@ jobs:
         if: steps.existing.outputs.exists == 'false'
         run: ./scripts/materialize.sh "${RUNNER_TEMP}/materialized"
 
+      - name: Install llvm-strip for the native library strip step
+        if: steps.existing.outputs.exists == 'false'
+        run: sudo apt-get update && sudo apt-get install -y llvm
+
       - name: Build every CLI target
         if: steps.existing.outputs.exists == 'false'
         run: |
