@@ -4,7 +4,7 @@
 | --- | --- |
 | Plan ID | 0007 |
 | File | `docs/plan/0007-strip-native-libraries.md` |
-| Status | In progress |
+| Status | Completed |
 | Created | 2026-10-30 |
 | Repository | `azrialwork/openick` |
 | Upstream | `anomalyco/opencode` |
@@ -159,12 +159,13 @@ republication audit and the completion record).
 | Date | Amendment |
 | --- | --- |
 | 2026-10-30 | Plan created. |
+| 2026-10-30 | Plan completed. All gates pass: the local `--single` build through the patched script logs the strip and produces a 166,713,520 byte binary that reports its version, completes the mock `opencode run` round trip, and renders the TUI in a PTY; a build with `OPENICK_STRIP=/bin/false` aborts naming the tool and the library and produces no binary; the patch stack applies cleanly on the pin and the materialized `build.ts` is identical to the verified development tree; `materialize.sh` completes with 11 patches and `verify-branding.sh` passes; the `validate` workflow is green (run `41086551117`). Republication audit (release run `41086748047`, Android run `41087177125`): exactly 10 assets; fresh downloads match `SHA256SUMS`; `delta-manifest.json` lists 11 patches; every archive shrank against Section 7 — Linux x64 69,079,631 → 66,289,841; x64 baseline 69,079,298 → 66,289,776; x64 musl 69,107,114 → 63,565,352; x64 baseline musl 69,107,114 → 63,565,352; arm64 67,938,036 → 65,174,291; arm64 musl 67,678,947 → 62,185,288; Android 61,234,929 → 58,516,095. The extracted Linux x64 binary is 166,713,520 bytes (down from 176,740,528) and reports 1.19.5; the extracted Android binary is 158,409,080 bytes, an AArch64 ELF with the Bionic interpreter. No on-device test was run, per the owner's standing instruction. |
 
 ## 9. Acceptance Criteria
 
-- [ ] Patch `0011-strip-native-libraries.patch` is in the stack and the
+- [x] Patch `0011-strip-native-libraries.patch` is in the stack and the
   local build gate (Gate 1) passes.
-- [ ] The abort behavior gate (Gate 2) passes.
-- [ ] The repository gates (Gate 3) and CI gate (Gate 4) pass.
-- [ ] The republication audit (Gate 5) is recorded in the amendment
+- [x] The abort behavior gate (Gate 2) passes.
+- [x] The repository gates (Gate 3) and CI gate (Gate 4) pass.
+- [x] The republication audit (Gate 5) is recorded in the amendment
   log.
