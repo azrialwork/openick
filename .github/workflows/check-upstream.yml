@@ -54,6 +54,10 @@ jobs:
           mv upstream.json.tmp upstream.json
           cat upstream.json
 
+      - name: Install llvm-strip for the native library strip step
+        if: steps.check.outputs.changed == 'true'
+        run: sudo apt-get update && sudo apt-get install -y llvm
+
       - name: Materialize and validate the new upstream release
         if: steps.check.outputs.changed == 'true'
         run: |
