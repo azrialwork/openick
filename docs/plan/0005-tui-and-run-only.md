@@ -4,7 +4,7 @@
 | --- | --- |
 | Plan ID | 0005 |
 | File | `docs/plan/0005-tui-and-run-only.md` |
-| Status | Active |
+| Status | Completed |
 | Created | 2026-10-30 |
 | Repository | `azrialwork/openick` |
 | Upstream | `anomalyco/opencode` |
@@ -234,20 +234,23 @@ marker issue opens, and the patch is rebased manually.
 | Date | Amendment |
 | --- | --- |
 | 2026-10-30 | Plan created. |
+| 2026-10-30 | Implementation scope completion recorded: three test surfaces of the deleted commands were found outside the typechecked trees during implementation — the `serve` subprocess integration tests, the `acp` integration tests, and the read-only command smokes (`mcp list`, `providers list`, `models`, `agent list`, `session list`, `stats`, `db path`) — and are deleted inside patches `0009`, `0010`, and `0011` respectively, per Locked Decision 10. The CLI help snapshot test now pins only the surviving surface and its snapshot is regenerated inside patch `0011`; the two `--attach` cases of the `run` process tests are deleted there as well. |
+| 2026-10-30 | Gate 3 evidence notes: with the commands deleted, a removed command word is treated by the CLI as a project directory argument of the default command (its standard behavior for any unknown word); the help output lists exactly the default TUI command and `run`. The published Linux x64 binary is 172,988,592 bytes against 213,354,672 bytes after Plan 0004 (−40,366,080 bytes, −18.9 percent), the web UI bundle being the bulk of the reduction. The `run` process integration suite is timing-sensitive on a loaded machine: under full-file parallel load, several of its 30-second subprocess budgets expire on the pre-plan tree as well (7 pass / 6 fail before this plan, 6 pass / 5 fail after, the deleted attach cases accounting for the count difference); every case passes when run individually on the final tree. This is a property of the test harness budgets, not of the delta. |
+| 2026-10-30 | Plan completed. Patches `0009` (11 files, −934), `0010` (36 files, −10,665), and `0011` (46 files, +20/−6,548) pass all gates: the Section 8 inventory returns no hits on the materialized tree; typecheck is clean for `packages/core`, `packages/opencode`, `packages/tui`, and `packages/schema`; the touched upstream test suites pass (runtime flags, control plane, config, and the run unit suites, 148/148, plus the regenerated help snapshot test); the Linux build completes the mock round trip through `opencode run` and a full prompt round trip inside the TUI in a pseudo-terminal; `validate` is green on `main` (run `40993746439`); the release was republished (runs `40993835214` and `40994034822`) with exactly the ten assets of Plan 0004, Locked Decision 7; fresh downloads of the Linux x64 and Android archives verify against the published `SHA256SUMS`, and the published Linux x64 binary reports `1.19.5` with only the TUI and `run` in its help output. Per Locked Decision 8, no on-device testing was performed. |
 
 ## 11. Acceptance Criteria
 
-- [ ] Patches `0009`, `0010`, and `0011` exist, carry the standard patch
+- [x] Patches `0009`, `0010`, and `0011` exist, carry the standard patch
   header, and are listed in `patches/README.md`.
-- [ ] The materialized tree passes the Section 8 inventory check (gate 1).
-- [ ] Typecheck passes for the affected packages (gate 2).
-- [ ] The functional checks of the Linux build pass, including the TUI
+- [x] The materialized tree passes the Section 8 inventory check (gate 1).
+- [x] Typecheck passes for the affected packages (gate 2).
+- [x] The functional checks of the Linux build pass, including the TUI
   pseudo-terminal round trip, the `run` round trip, and the help output
   check (gate 3).
-- [ ] The `validate` workflow is green on `main` with the full delta
+- [x] The `validate` workflow is green on `main` with the full delta
   (gate 4).
-- [ ] The `v1.19.5` release is republished with exactly the ten assets of
+- [x] The `v1.19.5` release is republished with exactly the ten assets of
   Plan 0004, Locked Decision 7 (gate 5).
-- [ ] Fresh downloads verify against the published `SHA256SUMS`, and the
+- [x] Fresh downloads verify against the published `SHA256SUMS`, and the
   republished Linux x64 binary reports version `1.19.5` (gate 5).
-- [ ] `README.md` states that the binary ships the TUI and `run` only.
+- [x] `README.md` states that the binary ships the TUI and `run` only.
