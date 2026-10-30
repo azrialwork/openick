@@ -60,7 +60,7 @@ A further patch carries the update-feature removal defined in
   server endpoint, the installation upgrade functions, and the
   `autoupdate` configuration surface.
 
-Three further patches carry the TUI-and-run-only reduction defined in
+Two further patches carry the mode reduction defined in
 `docs/plan/0005-tui-and-run-only.md`:
 
 - `0009-remove-web-serve-attach.patch` deletes the web, serve, and attach
@@ -71,9 +71,7 @@ Three further patches carry the TUI-and-run-only reduction defined in
   (the `acp` command and the whole protocol module) and the GitHub
   Actions mode (the `github` command, its handler, and its shared
   module).
-- `0011-remove-utility-commands.patch` deletes every remaining utility
-  command (providers, account, models, agent, mcp, session, export,
-  import, stats, plugin, db, debug, generate, pr), the yargs completion
-  command, the uninstall command with the orphaned installation service,
-  and the `run` command's `--attach` remote-server path. The CLI surface
-  is now exactly the TUI and `run`.
+
+A third Plan 0005 patch, `0011-remove-utility-commands.patch`, was
+revoked by the owner on 2026-10-30 and removed from this delta. The
+utility commands it deleted are present in the materialized tree again.
