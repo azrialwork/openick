@@ -4,7 +4,7 @@
 | --- | --- |
 | Plan ID | 0008 |
 | File | `docs/plan/0008-remove-generate-command.md` |
-| Status | In progress |
+| Status | Completed |
 | Created | 2026-10-30 |
 | Repository | `azrialwork/openick` |
 | Upstream | `anomalyco/opencode` |
@@ -116,12 +116,14 @@ completion record).
 | Date | Amendment |
 | --- | --- |
 | 2026-10-30 | Plan created. |
+| 2026-10-30 | Gate 1 correction, found during execution: the help snapshot test fails identically before and after this change in the development tree (one stale snapshot for commands removed by earlier plans), so the gate was applied as "no new failures relative to the pre-change baseline"; the counts matched exactly (1 failed snapshot, 7 assertions both ways). The `packages/opencode` typecheck is clean and the source inventory finds no remaining reference to the command. |
+| 2026-10-30 | Completed. Local build: 163,043,504 bytes (Plan 0007: 166,713,520; −3,670,016), help lists 16 commands with no `generate` entry and every other command intact, `opencode run` mock round trip and PTY TUI render pass. The 12-patch stack applies cleanly on the pin; materialize and branding gates pass; `validate` run `41095434886` is green. Republication audit: release run `41095635104` and `build-android` run `41095932131` republished `v1.19.5` with exactly ten assets; fresh downloads match the published `SHA256SUMS` (9 of 9 listed assets OK) and the manifest lists 12 patches. The published Linux x64 binary is 163,043,504 bytes, byte-size-identical to the local build, reports 1.19.5, and its help has no `generate` command; the Android binary is 154,739,064 bytes (Plan 0007: 158,409,080; the same −3,670,016 delta). |
 
 ## 7. Acceptance Criteria
 
-- [ ] Patch `0012-remove-generate-command.patch` is in the stack and
+- [x] Patch `0012-remove-generate-command.patch` is in the stack and
   the development-tree gate (Gate 1) passes.
-- [ ] The local build gate (Gate 2) passes.
-- [ ] The repository gates (Gate 3) and CI gate (Gate 4) pass.
-- [ ] The republication audit (Gate 5) is recorded in the amendment
+- [x] The local build gate (Gate 2) passes.
+- [x] The repository gates (Gate 3) and CI gate (Gate 4) pass.
+- [x] The republication audit (Gate 5) is recorded in the amendment
   log.
