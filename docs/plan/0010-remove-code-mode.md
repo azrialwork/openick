@@ -4,7 +4,7 @@
 | --- | --- |
 | Plan ID | 0010 |
 | File | `docs/plan/0010-remove-code-mode.md` |
-| Status | In progress |
+| Status | Completed |
 | Created | 2026-10-31 |
 | Repository | `azrialwork/openick` |
 | Upstream | `anomalyco/opencode` |
@@ -125,12 +125,14 @@ completion record).
 | Date | Amendment |
 | --- | --- |
 | 2026-10-31 | Plan created. |
+| 2026-10-31 | Scope completed during implementation, recorded per the governance rule: the TUI carries a dedicated renderer for `execute` tool parts in `packages/tui/src/routes/session/index.tsx` (the `Execute` component, its `executeCalls` metadata reader, and the `execute` entry in the tool display set). It exists solely for this tool, so it is removed under Locked Decision 1's intent; historical `execute` parts in old sessions now fall back to the generic tool renderer. Implementation also confirmed a fourth wiring point the mapping had grouped with the registry entry: the conditional `tool.execute` element in the builtin list, removed with the rest. |
+| 2026-10-31 | Completion record (Auditor). Gate 1: typechecks clean in core, opencode, and tui; inventory shows zero references to `@opencode-ai/codemode`, `experimentalCodeMode`, or `OPENCODE_EXPERIMENTAL_CODE_MODE` in product source; touched suites (tool, mcp, config, session, tui) show no failures beyond the pre-existing baseline. Gate 2: local `--single` build is 147,191,984 bytes (Plan 0009: 151,083,184; −3,891,200, matching the 3.7 MiB bundle measurement); its `opencode models` output matches Plan 0009's rule on the live registry; the mock round trip and the PTY TUI render pass. Gate 3: the fourteen-patch stack applies cleanly on a pristine checkout of the pin and reproduces the development tree; `materialize.sh` completes with a 14-patch manifest and `verify-branding.sh` passes. Gate 4: `validate` run `41205697112` green. Gate 5: release run `41205766069` and `build-android` run `41205942139` republished `v1.19.5` with exactly 10 assets; fresh downloads match `SHA256SUMS` (9 of 9 listed files OK); the manifest lists 14 patches; the published Linux x64 binary is 147,191,984 bytes, reports 1.19.5, and its `opencode models` output matches the rule; the Android binary is 138,879,352 bytes (was 142,811,512). All acceptance criteria met. |
 
 ## 7. Acceptance Criteria
 
-- [ ] Patch `0014-remove-code-mode.patch` is in the stack and the
+- [x] Patch `0014-remove-code-mode.patch` is in the stack and the
   development-tree gate (Gate 1) passes.
-- [ ] The local build gate (Gate 2) passes.
-- [ ] The repository gates (Gate 3) and CI gate (Gate 4) pass.
-- [ ] The republication audit (Gate 5) is recorded in the amendment
+- [x] The local build gate (Gate 2) passes.
+- [x] The repository gates (Gate 3) and CI gate (Gate 4) pass.
+- [x] The republication audit (Gate 5) is recorded in the amendment
   log.
