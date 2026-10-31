@@ -103,3 +103,13 @@ Plan `docs/plan/0009-opencode-provider-only.md` adds one patch:
   providers, the GitLab workflow model wiring, and the config path
   that created providers from user configuration are removed; the
   connect UI keeps only the remaining provider.
+
+Plan `docs/plan/0010-remove-code-mode.md` adds one patch:
+
+- `0014-remove-code-mode.patch` deletes the experimental code-mode
+  tool (id `execute`), its flag-gated registry wiring, the
+  `OPENCODE_EXPERIMENTAL_CODE_MODE` runtime flag, and the TUI's
+  dedicated renderer for its tool parts. The tool was off by default
+  but kept the `@opencode-ai/codemode` interpreter and the TypeScript
+  compiler inside every binary; MCP tools are now always listed to
+  the model individually, as the default already behaved.
