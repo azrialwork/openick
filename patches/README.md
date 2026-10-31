@@ -92,3 +92,14 @@ Plan `docs/plan/0008-remove-generate-command.md` adds one patch:
   server's OpenAPI specification through the `prettier` library, its
   only importer in the bundle graph; the OpenAPI machinery itself and
   every other command stay.
+
+Plan `docs/plan/0009-opencode-provider-only.md` adds one patch:
+
+- `0013-opencode-free-models-only.patch` restricts the model catalog
+  to the `opencode` provider and, inside it, to models whose base
+  cost is free, applied where every catalog source converges and in
+  the build-time snapshot. The other bundled provider SDKs, the
+  per-provider custom loaders, the built-in auth plugins for other
+  providers, the GitLab workflow model wiring, and the config path
+  that created providers from user configuration are removed; the
+  connect UI keeps only the remaining provider.
