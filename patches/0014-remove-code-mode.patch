@@ -1,0 +1,1736 @@
+# Patch 0014 — Remove the experimental code-mode tool
+#
+# Purpose: Delete the experimental code-mode tool in full. The tool
+# (id "execute") ran a confined orchestration script against
+# connected MCP tools through the @opencode-ai/codemode interpreter.
+# It was off by default, gated by the OPENCODE_EXPERIMENTAL_CODE_MODE
+# runtime flag, but its dynamic import kept the interpreter and the
+# TypeScript compiler (imported only by that interpreter) inside
+# every shipped binary — about 3.7 MiB of bundle. With the tool gone,
+# MCP tools are always listed to the model individually, which is
+# the behavior the default configuration already had. The codemode
+# workspace package and the dependency declarations stay; the bundle
+# loses them through reachability alone.
+#
+# Upstream files:
+#   - packages/opencode/src/tool/code-mode.ts (deleted)
+#   - packages/opencode/src/tool/registry.ts (flag-gated dynamic
+#     import, the conditional execute tool entry, the catalog
+#     description plumbing, and the builtin list entry removed)
+#   - packages/opencode/src/session/tools.ts (the code-mode early
+#     return that hid individual MCP tools removed)
+#   - packages/opencode/src/effect/runtime-flags.ts
+#     (experimentalCodeMode flag removed)
+#   - packages/tui/src/routes/session/index.tsx (the dedicated
+#     execute tool renderer removed; historical parts fall back to
+#     the generic renderer)
+#   - Tests: test/tool/code-mode.test.ts and
+#     code-mode-integration.test.ts deleted; registry tests lose the
+#     two enabled-flag cases and keep asserting no execute tool is
+#     exposed.
+#
+# Rebase note: registry.ts is moderate traffic; the deletions are
+# mechanical (remove the import of ./code-mode and every "execute"
+# special case). If upstream renames the tool id, re-apply by
+# deleting the same wiring under the new id.
+diff --git a/packages/opencode/src/effect/runtime-flags.ts b/packages/opencode/src/effect/runtime-flags.ts
+index b9ee240..56a8154 100644
+--- a/packages/opencode/src/effect/runtime-flags.ts
++++ b/packages/opencode/src/effect/runtime-flags.ts
+@@ -44,7 +44,6 @@ export class Service extends ConfigService.Service<Service>()("@opencode/Runtime
+   experimentalLspTool: enabledByExperimental("OPENCODE_EXPERIMENTAL_LSP_TOOL"),
+   experimentalOxfmt: enabledByExperimental("OPENCODE_EXPERIMENTAL_OXFMT"),
+   experimentalPlanMode: enabledByExperimental("OPENCODE_EXPERIMENTAL_PLAN_MODE"),
+-  experimentalCodeMode: enabledByExperimental("OPENCODE_EXPERIMENTAL_CODE_MODE"),
+   experimentalEventSystem: enabledByExperimental("OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"),
+   experimentalWorkspaces: enabledByExperimental("OPENCODE_EXPERIMENTAL_WORKSPACES"),
+   experimentalIconDiscovery: enabledByExperimental("OPENCODE_EXPERIMENTAL_ICON_DISCOVERY"),
+diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/session/tools.ts
+index 99f7aec..b569e88 100644
+--- a/packages/opencode/src/session/tools.ts
++++ b/packages/opencode/src/session/tools.ts
+@@ -54,7 +54,6 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+   const registry = yield* ToolRegistry.Service
+   const mcp = yield* MCP.Service
+   const truncate = yield* Truncate.Service
+-  const flags = yield* RuntimeFlags.Service
+ 
+   const context = (args: Record<string, unknown>, options: ToolExecutionOptions): Tool.Context => ({
+     sessionID: input.session.id,
+@@ -385,8 +384,6 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+     })
+   }
+ 
+-  if (flags.experimentalCodeMode) return tools
+-
+   for (const [key, entry] of Object.entries(yield* mcp.tools())) {
+     const item = McpCatalog.convertTool(entry.def, entry.client, entry.timeout)
+     const execute = item.execute
+diff --git a/packages/opencode/src/tool/code-mode.ts b/packages/opencode/src/tool/code-mode.ts
+deleted file mode 100644
+index 332d4b4..0000000
+--- a/packages/opencode/src/tool/code-mode.ts
++++ /dev/null
+@@ -1,310 +0,0 @@
+-import * as Tool from "./tool"
+-import { CallToolResultSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js"
+-import { Cause, Effect, Schema } from "effect"
+-import { CodeMode, Tool as SandboxTool, toolError } from "@opencode-ai/codemode"
+-import { MCP } from "@/mcp"
+-import { McpCatalog } from "@/mcp/catalog"
+-import { Agent } from "@/agent/agent"
+-import { Session } from "@/session/session"
+-import { Permission } from "@/permission"
+-import { Plugin } from "@/plugin"
+-
+-export const CODE_MODE_TOOL = "execute"
+-
+-const DESCRIPTION = "Run a confined orchestration script with access to connected MCP tools."
+-
+-export const Parameters = Schema.Struct({
+-  code: Schema.String.annotate({
+-    description: "Script body executed by the confined interpreter.",
+-  }),
+-})
+-
+-type CallEntry = { tool: string; status: "running" | "completed" | "error"; input?: Record<string, unknown> }
+-
+-type Metadata = {
+-  toolCalls: CallEntry[]
+-  error?: boolean
+-}
+-
+-type Attachment = NonNullable<Tool.ExecuteResult["attachments"]>[number]
+-
+-type CatalogEntry = {
+-  path: string
+-  key: string
+-  server: string
+-  local: string
+-  tool: MCP.McpTool
+-}
+-
+-function groupByServer(mcpTools: Record<string, MCP.McpTool>, servers: readonly string[]): Map<string, CatalogEntry[]> {
+-  const byLongest = [...servers].sort((a, b) => b.length - a.length)
+-  const groups = new Map<string, CatalogEntry[]>()
+-  for (const key of Object.keys(mcpTools).sort((a, b) => a.localeCompare(b))) {
+-    const server =
+-      byLongest.find((name) => key.startsWith(name + "_")) ?? (key.includes("_") ? key.slice(0, key.indexOf("_")) : key)
+-    const local = server && key.startsWith(server + "_") ? key.slice(server.length + 1) : key
+-    const entry: CatalogEntry = {
+-      path: `${server}.${local}`,
+-      key,
+-      server,
+-      local,
+-      tool: mcpTools[key]!,
+-    }
+-    groups.set(server, [...(groups.get(server) ?? []), entry])
+-  }
+-  return groups
+-}
+-
+-export function describeCatalog(mcpTools: Record<string, MCP.McpTool>, servers: readonly string[]): string {
+-  return CodeMode.make({
+-    tools: toolTree(
+-      [...groupByServer(mcpTools, servers).values()].flat(),
+-      () => () => Effect.fail(toolError("Tool preview is not executable.")),
+-    ),
+-  }).instructions()
+-}
+-
+-const lastSegment = (uri: string) => {
+-  const trimmed = uri.split(/[?#]/, 1)[0]!.replace(/\/+$/, "")
+-  const segment = trimmed.slice(trimmed.lastIndexOf("/") + 1)
+-  return segment.length > 0 ? segment : undefined
+-}
+-
+-const dataUrl = (mime: string, base64: string) => `data:${mime};base64,${base64}`
+-
+-function projectMcpResult(result: CallToolResult, collect: (attachment: Attachment) => void): unknown {
+-  const text: string[] = []
+-  let files = 0
+-  let images = 0
+-  const push = (attachment: Attachment) => {
+-    files += 1
+-    if (attachment.mime.startsWith("image/")) images += 1
+-    collect(attachment)
+-  }
+-  for (const block of result.content) {
+-    switch (block.type) {
+-      case "text":
+-        text.push(block.text)
+-        break
+-      case "image":
+-      case "audio":
+-        push({ type: "file", mime: block.mimeType, url: dataUrl(block.mimeType, block.data) })
+-        break
+-      case "resource": {
+-        if ("text" in block.resource) {
+-          text.push(block.resource.text)
+-          break
+-        }
+-        const mime = block.resource.mimeType ?? "application/octet-stream"
+-        push({ type: "file", mime, url: dataUrl(mime, block.resource.blob), filename: lastSegment(block.resource.uri) })
+-        break
+-      }
+-      case "resource_link":
+-        // A link is a reference, not fetchable media; hand it to the program instead of the attachment channel.
+-        text.push(`${block.name}: ${block.uri}`)
+-        break
+-    }
+-  }
+-
+-  if (result.structuredContent !== undefined && result.structuredContent !== null) return result.structuredContent
+-  if (text.length > 0) return text.join("\n")
+-  if (files > 0) {
+-    const noun = files === images ? "image" : "file"
+-    return `[${files} ${noun}${files === 1 ? "" : "s"} attached to the result]`
+-  }
+-  return null
+-}
+-
+-type Run = (input: unknown) => Effect.Effect<unknown, unknown>
+-
+-function toolTree(catalog: readonly CatalogEntry[], run: (entry: CatalogEntry) => Run) {
+-  const tree: Record<string, Record<string, SandboxTool.Definition>> = {}
+-  for (const entry of catalog) {
+-    const namespace = (tree[entry.server] ??= {})
+-    namespace[entry.local] = SandboxTool.make({
+-      description: entry.tool.def.description ?? "",
+-      input: entry.tool.def.inputSchema as SandboxTool.JsonSchema,
+-      output: entry.tool.def.outputSchema as SandboxTool.JsonSchema | undefined,
+-      run: run(entry),
+-    })
+-  }
+-  return tree
+-}
+-
+-const invokeChildTool = Effect.fn("CodeMode.invokeChildTool")(function* (input: {
+-  plugin: Plugin.Interface
+-  entry: CatalogEntry
+-  args: Record<string, unknown>
+-  callID: string
+-  ctx: Tool.Context
+-}) {
+-  yield* input.plugin.trigger(
+-    "tool.execute.before",
+-    { tool: input.entry.key, sessionID: input.ctx.sessionID, callID: input.callID },
+-    { args: input.args },
+-  )
+-  const result: CallToolResult = yield* Effect.gen(function* () {
+-    yield* input.ctx.ask({ permission: input.entry.key, metadata: {}, patterns: ["*"], always: ["*"] })
+-    // Deliberately mirrors McpCatalog.convertTool's transport call so the MCP service stays free of tool-loop concerns.
+-    return yield* Effect.promise(async () => {
+-      const raw = await input.entry.tool.client.callTool(
+-        { name: input.entry.tool.def.name, arguments: input.args },
+-        CallToolResultSchema,
+-        {
+-          resetTimeoutOnProgress: true,
+-          signal: input.ctx.abort,
+-          timeout: input.entry.tool.timeout,
+-          // The MCP SDK only sends a progress token when this hook is present, enabling timeout resets.
+-          onprogress: () => {},
+-        },
+-      )
+-      if (raw.isError)
+-        throw new Error(
+-          raw.content
+-            .flatMap((item) => (item.type === "text" ? [item.text] : []))
+-            .filter((text) => text.trim())
+-            .join("\n\n") || "MCP tool returned an error",
+-        )
+-      return raw
+-    })
+-  }).pipe(
+-    Effect.withSpan("Tool.execute", {
+-      attributes: {
+-        "tool.name": input.entry.key,
+-        "tool.call_id": input.callID,
+-        "session.id": input.ctx.sessionID,
+-        "message.id": input.ctx.messageID,
+-      },
+-    }),
+-  )
+-  yield* input.plugin.trigger(
+-    "tool.execute.after",
+-    { tool: input.entry.key, sessionID: input.ctx.sessionID, callID: input.callID, args: input.args },
+-    result,
+-  )
+-  return result
+-})
+-
+-export const CodeModeTool = Tool.define(
+-  CODE_MODE_TOOL,
+-  Effect.gen(function* () {
+-    const mcp = yield* MCP.Service
+-    const agents = yield* Agent.Service
+-    const sessions = yield* Session.Service
+-    const plugin = yield* Plugin.Service
+-
+-    const init: Tool.DefWithoutID<typeof Parameters, Metadata> = {
+-      description: DESCRIPTION,
+-      parameters: Parameters,
+-      execute: Effect.fn("CodeMode.execute")(function* (params, ctx) {
+-        if (ctx.abort.aborted) {
+-          return {
+-            title: CODE_MODE_TOOL,
+-            metadata: { toolCalls: [], error: true },
+-            output: "Execution cancelled.",
+-          } satisfies Tool.ExecuteResult<Metadata>
+-        }
+-        const agent = yield* agents.get(ctx.agent)
+-        const session = yield* sessions.get(ctx.sessionID).pipe(Effect.orDie)
+-        const ruleset = Permission.merge(agent.permission, session.permission ?? [])
+-        const mcpTools = Permission.visibleTools(yield* mcp.tools(), ruleset)
+-        const servers = Object.keys(yield* mcp.clients()).map(McpCatalog.sanitize)
+-        const catalog = [...groupByServer(mcpTools, servers).values()].flat()
+-
+-        const calls: CallEntry[] = []
+-        const attachments: Attachment[] = []
+-        const publish = () =>
+-          ctx.metadata({ title: CODE_MODE_TOOL, metadata: { toolCalls: calls.map((c) => ({ ...c })) } })
+-
+-        let childCalls = 0
+-        const callTool = (entry: CatalogEntry) => (input: unknown) =>
+-          Effect.gen(function* () {
+-            childCalls += 1
+-            const result = yield* invokeChildTool({
+-              plugin,
+-              entry,
+-              args: (input ?? {}) as Record<string, unknown>,
+-              callID: `${ctx.callID ?? entry.key}/${childCalls}`,
+-              ctx,
+-            })
+-            return projectMcpResult(result, (attachment: Attachment) => void attachments.push(attachment))
+-          }).pipe(
+-            Effect.catchCause((cause) => {
+-              if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt
+-              const error = Cause.squash(cause)
+-              return Effect.fail(toolError(error instanceof Error ? error.message : String(error), error))
+-            }),
+-          )
+-
+-        const runtime = CodeMode.make({
+-          tools: toolTree(catalog, callTool),
+-          onToolCallStart: ({ index, name, input }) =>
+-            Effect.suspend(() => {
+-              const shown = (() => {
+-                if (input === null || input === undefined) return
+-                if (typeof input === "object" && !Array.isArray(input)) {
+-                  const value = input as Record<string, unknown>
+-                  return Object.keys(value).length > 0 ? value : undefined
+-                }
+-                return { input }
+-              })()
+-              calls[index] = { tool: name, status: "running", ...(shown ? { input: shown } : {}) }
+-              return publish()
+-            }),
+-          onToolCallEnd: ({ index, outcome }) =>
+-            Effect.suspend(() => {
+-              const current = calls[index]
+-              if (current) calls[index] = { ...current, status: outcome === "success" ? "completed" : "error" }
+-              return publish()
+-            }),
+-        })
+-
+-        const abort = Effect.callback<void>((resume) => {
+-          if (ctx.abort.aborted) return resume(Effect.void)
+-          const handler = () => resume(Effect.void)
+-          ctx.abort.addEventListener("abort", handler, { once: true })
+-          return Effect.sync(() => ctx.abort.removeEventListener("abort", handler))
+-        })
+-        const cancelled = (): CodeMode.Result => ({
+-          ok: false,
+-          error: { kind: "ExecutionFailure", message: "Execution cancelled." },
+-          toolCalls: calls.map((call) => ({ name: call.tool })),
+-        })
+-
+-        const result = yield* Effect.raceFirst(runtime.execute(params.code), abort.pipe(Effect.map(cancelled)))
+-        const logs = result.logs ?? []
+-        const withLogs = (text: string) => {
+-          if (logs.length === 0) return text
+-          return text.length > 0 ? `${text}\n\nLogs:\n${logs.join("\n")}` : `Logs:\n${logs.join("\n")}`
+-        }
+-
+-        if (!result.ok) {
+-          if (ctx.abort.aborted) {
+-            return {
+-              title: CODE_MODE_TOOL,
+-              metadata: { toolCalls: calls, error: true },
+-              output: "Execution cancelled.",
+-            } satisfies Tool.ExecuteResult<Metadata>
+-          }
+-          const hints = (result.error.suggestions ?? []).filter((hint) => !result.error.message.includes(hint))
+-          return yield* Effect.fail(new Error(withLogs([result.error.message, ...hints].join("\n"))))
+-        }
+-
+-        // The interpreter validates returned values as plain JSON, so stringify cannot throw;
+-        // it yields undefined only for a program that returns undefined.
+-        const output =
+-          typeof result.value === "string"
+-            ? result.value
+-            : (JSON.stringify(result.value, null, 2) ?? String(result.value))
+-
+-        return {
+-          title: CODE_MODE_TOOL,
+-          metadata: { toolCalls: calls },
+-          output: withLogs(output),
+-          ...(attachments.length > 0 ? { attachments } : {}),
+-        } satisfies Tool.ExecuteResult<Metadata>
+-      }, Effect.orDie),
+-    }
+-    return init
+-  }),
+-)
+diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
+index 9167cb3..a51f93c 100644
+--- a/packages/opencode/src/tool/registry.ts
++++ b/packages/opencode/src/tool/registry.ts
+@@ -53,7 +53,6 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { MCP } from "@/mcp"
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+-import { McpCatalog } from "@/mcp/catalog"
+ 
+ export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
+   return (
+@@ -96,7 +95,6 @@ const layer = Layer.effect(
+     const agents = yield* Agent.Service
+     const truncate = yield* Truncate.Service
+     const flags = yield* RuntimeFlags.Service
+-    const mcp = yield* MCP.Service
+ 
+     const invalid = yield* InvalidTool
+     const task = yield* TaskTool
+@@ -115,8 +113,6 @@ const layer = Layer.effect(
+     const patchtool = yield* ApplyPatchTool
+     const skilltool = yield* SkillTool
+     const agent = yield* Agent.Service
+-    const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
+-    const codeModeTool = codeMode ? yield* codeMode.CodeModeTool : undefined
+ 
+     const state = yield* InstanceState.make<State>(
+       Effect.fn("ToolRegistry.state")(function* (ctx) {
+@@ -223,7 +219,6 @@ const layer = Layer.effect(
+           question: Tool.init(question),
+           lsp: Tool.init(lsptool),
+           plan: Tool.init(plan),
+-          ...(codeModeTool ? { execute: Tool.init(codeModeTool) } : {}),
+         })
+ 
+         return {
+@@ -243,7 +238,6 @@ const layer = Layer.effect(
+             tool.search,
+             tool.skill,
+             tool.patch,
+-            ...(tool.execute ? [tool.execute] : []),
+             ...(flags.experimentalLspTool ? [tool.lsp] : []),
+             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
+           ],
+@@ -277,17 +271,6 @@ const layer = Layer.effect(
+       return ["Available agent types and the tools they have access to:", description].join("\n")
+     })
+ 
+-    const describeCodeMode = Effect.fn("ToolRegistry.describeCodeMode")(function* (input: {
+-      agent: Agent.Info
+-      permission?: PermissionV1.Ruleset
+-    }) {
+-      if (!codeMode) return
+-      const ruleset = Permission.merge(input.agent.permission, input.permission ?? [])
+-      const tools = Permission.visibleTools(yield* mcp.tools(), ruleset)
+-      if (Object.keys(tools).length === 0) return
+-      return codeMode.describeCatalog(tools, Object.keys(yield* mcp.clients()).map(McpCatalog.sanitize))
+-    })
+-
+     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
+       const filtered = (yield* all()).filter((tool) => {
+         if (tool.id === WebSearchTool.id) {
+@@ -302,13 +285,8 @@ const layer = Layer.effect(
+         return true
+       })
+ 
+-      const codeModeDescription = filtered.some((tool) => tool.id === "execute")
+-        ? yield* describeCodeMode(input)
+-        : undefined
+-      const visible = filtered.filter((tool) => tool.id !== "execute" || codeModeDescription)
+-
+       return yield* Effect.forEach(
+-        visible,
++        filtered,
+         Effect.fnUntraced(function* (tool: Tool.Def) {
+           const output = {
+             description: tool.description,
+@@ -325,7 +303,6 @@ const layer = Layer.effect(
+             description: [
+               output.description,
+               tool.id === TaskTool.id ? yield* describeTask(input.agent) : undefined,
+-              tool.id === "execute" ? codeModeDescription : undefined,
+             ]
+               .filter(Boolean)
+               .join("\n"),
+diff --git a/packages/opencode/test/tool/code-mode-integration.test.ts b/packages/opencode/test/tool/code-mode-integration.test.ts
+deleted file mode 100644
+index 671acd8..0000000
+--- a/packages/opencode/test/tool/code-mode-integration.test.ts
++++ /dev/null
+@@ -1,331 +0,0 @@
+-import { beforeAll, describe, expect, test } from "bun:test"
+-import { CodeModeTool, describeCatalog } from "@/tool/code-mode"
+-import { McpCatalog } from "@/mcp/catalog"
+-import { Agent } from "@/agent/agent"
+-import { MCP } from "@/mcp"
+-import { Plugin } from "@/plugin"
+-import { Session } from "@/session/session"
+-import { Tool } from "@/tool/tool"
+-import * as Truncate from "@/tool/truncate"
+-import { MessageID, SessionID } from "@/session/schema"
+-import { Server } from "@modelcontextprotocol/sdk/server/index.js"
+-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
+-import type { Client } from "@modelcontextprotocol/sdk/client/index.js"
+-import {
+-  CallToolRequestSchema,
+-  LATEST_PROTOCOL_VERSION,
+-  ListToolsRequestSchema,
+-  type Tool as MCPToolDef,
+-} from "@modelcontextprotocol/sdk/types.js"
+-import { Cause, Effect, Exit, Layer } from "effect"
+-
+-const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+-
+-const SERVER = "fixtures"
+-
+-const ctx: Tool.Context = {
+-  sessionID: SessionID.make("ses_code-mode-int"),
+-  messageID: MessageID.make("msg_code-mode-int"),
+-  agent: "build",
+-  abort: new AbortController().signal,
+-  callID: "call_code_mode_int",
+-  messages: [],
+-  metadata: () => Effect.void,
+-  ask: () => Effect.void,
+-}
+-
+-// Avoid the SDK Client here; other MCP tests mock it process-globally.
+-class RawJsonRpcClient {
+-  private nextId = 1
+-  private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>()
+-
+-  constructor(private transport: InMemoryTransport) {}
+-
+-  async connect() {
+-    this.transport.onmessage = (message) => {
+-      const msg = message as { id?: number; result?: unknown; error?: { message: string } }
+-      if (msg.id === undefined) return
+-      const entry = this.pending.get(msg.id)
+-      if (!entry) return
+-      this.pending.delete(msg.id)
+-      if (msg.error) entry.reject(new Error(msg.error.message))
+-      else entry.resolve(msg.result)
+-    }
+-    await this.transport.start()
+-    await this.request("initialize", {
+-      protocolVersion: LATEST_PROTOCOL_VERSION,
+-      capabilities: {},
+-      clientInfo: { name: "test-client", version: "1.0.0" },
+-    })
+-    await this.transport.send({ jsonrpc: "2.0", method: "notifications/initialized" })
+-  }
+-
+-  private request(method: string, params: unknown): Promise<any> {
+-    const id = this.nextId++
+-    const result = new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }))
+-    void this.transport.send({ jsonrpc: "2.0", id, method, params } as never)
+-    return result
+-  }
+-
+-  listTools() {
+-    return this.request("tools/list", {})
+-  }
+-
+-  callTool(params: { name: string; arguments?: Record<string, unknown> }, _schema?: unknown, _options?: unknown) {
+-    return this.request("tools/call", params)
+-  }
+-}
+-
+-const TOOL_DEFS: MCPToolDef[] = [
+-  {
+-    name: "get_text",
+-    description: "Greet someone and return the greeting as text",
+-    inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+-  },
+-  {
+-    name: "add",
+-    description: "Add two numbers and return the structured sum",
+-    inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
+-    outputSchema: { type: "object", properties: { sum: { type: "number" } }, required: ["sum"] },
+-  },
+-  {
+-    name: "screenshot",
+-    description: "Capture a screenshot and return it as an image",
+-    inputSchema: { type: "object", properties: {} },
+-  },
+-  {
+-    name: "boom",
+-    description: "A tool that always fails",
+-    inputSchema: { type: "object", properties: {} },
+-  },
+-] as MCPToolDef[]
+-
+-function handleCall(name: string, args: Record<string, unknown>) {
+-  switch (name) {
+-    case "get_text":
+-      return { content: [{ type: "text", text: `hello ${args.name}` }] }
+-    case "add": {
+-      const sum = (args.a as number) + (args.b as number)
+-      return { content: [{ type: "text", text: String(sum) }], structuredContent: { sum } }
+-    }
+-    case "screenshot":
+-      return { content: [{ type: "image", data: PNG, mimeType: "image/png" }] }
+-    case "boom":
+-      return { content: [{ type: "text", text: "kaboom" }], isError: true }
+-    default:
+-      return { content: [{ type: "text", text: `unknown tool ${name}` }], isError: true }
+-  }
+-}
+-
+-let tool: Awaited<ReturnType<typeof buildTool>>["tool"]
+-let description: string
+-
+-async function buildTool() {
+-  const server = new Server({ name: SERVER, version: "1.0.0" }, { capabilities: { tools: {} } })
+-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_DEFS }))
+-  server.setRequestHandler(CallToolRequestSchema, async (req) =>
+-    handleCall(req.params.name, (req.params.arguments ?? {}) as Record<string, unknown>),
+-  )
+-
+-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+-  await server.connect(serverTransport)
+-  const client = new RawJsonRpcClient(clientTransport)
+-  await client.connect()
+-
+-  const listed = (await client.listTools()).tools as MCPToolDef[]
+-  const mcpTools: Record<string, MCP.McpTool> = {}
+-  for (const def of listed) {
+-    mcpTools[McpCatalog.toolName(SERVER, def.name)] = { def, client: client as unknown as Client }
+-  }
+-
+-  const layer = Layer.mergeAll(
+-    Layer.mock(Plugin.Service, {
+-      trigger: ((_name: unknown, _input: unknown, output: unknown) =>
+-        Effect.succeed(output)) as Plugin.Interface["trigger"],
+-    }),
+-    Layer.mock(Truncate.Service, {
+-      output: (text: string) => Effect.succeed({ content: text, truncated: false as const }),
+-    }),
+-    Layer.mock(Agent.Service, { get: () => Effect.succeed({ name: "build", permission: [] } as any) }),
+-    Layer.mock(Session.Service, { get: () => Effect.succeed({ permission: [] } as any) }),
+-    Layer.mock(MCP.Service, {
+-      tools: () => Effect.succeed(mcpTools),
+-      clients: () => Effect.succeed({ [SERVER]: {} as any }),
+-    }),
+-  )
+-  return {
+-    tool: await Effect.runPromise(CodeModeTool.pipe(Effect.flatMap(Tool.init), Effect.provide(layer))),
+-    description: describeCatalog(mcpTools, [SERVER]),
+-  }
+-}
+-
+-const run = (code: string) => Effect.runPromise(tool.execute({ code }, ctx))
+-// Program failures die at the tool boundary; recover the defect for message assertions.
+-const runFailed = async (code: string) => {
+-  const exit = await Effect.runPromise(tool.execute({ code }, ctx).pipe(Effect.exit))
+-  if (Exit.isSuccess(exit)) throw new Error("expected the tool to fail")
+-  return Cause.squash(exit.cause) as Error
+-}
+-
+-beforeAll(async () => {
+-  const built = await buildTool()
+-  tool = built.tool
+-  description = built.description
+-})
+-
+-describe("code mode integration (real MCP server)", () => {
+-  test("the appended catalog inlines full signatures with real MCP schemas", () => {
+-    expect(description).toContain("Available tools (COMPLETE list")
+-    expect(description).toContain("- fixtures (4 tools)")
+-    expect(description).toContain(
+-      "tools.fixtures.add(input: {\n  a: number,\n  b: number,\n}): Promise<{\n  sum: number,\n}>",
+-    )
+-    expect(description).toContain("tools.fixtures.get_text(input: {\n  name: string,\n}): Promise<unknown>")
+-    expect(description).toContain("// Add two numbers and return the structured sum")
+-    expect(description).not.toContain("$codemode")
+-    expect(description).toContain("## Workflow")
+-    expect(description).toContain("Do not infer or normalize tool names")
+-    expect(description).toContain("bracket notation and quotes are part of the path")
+-    expect(description).not.toContain("total_count")
+-  })
+-
+-  test("calls a text tool and receives its text as the native result", async () => {
+-    const out = await run("const r = await tools.fixtures.get_text({ name: 'world' }); return r")
+-    expect(out.output).toBe("hello world")
+-    expect(out.metadata.toolCalls).toEqual([
+-      { tool: "fixtures.get_text", status: "completed", input: { name: "world" } },
+-    ])
+-    expect(out.attachments).toBeUndefined()
+-  })
+-
+-  test("exposes structured data natively from a tool with an outputSchema", async () => {
+-    const out = await run("const r = await tools.fixtures.add({ a: 2, b: 3 }); return r.sum")
+-    expect(out.output).toBe("5")
+-  })
+-
+-  test("composes multiple structured calls and returns a plain object", async () => {
+-    const out = await run(`
+-      const first = await tools.fixtures.add({ a: 1, b: 2 })
+-      const second = await tools.fixtures.add({ a: first.sum, b: 10 })
+-      return { total: second.sum }
+-    `)
+-    expect(JSON.parse(out.output)).toEqual({ total: 13 })
+-    expect(out.metadata.toolCalls).toEqual([
+-      { tool: "fixtures.add", status: "completed", input: { a: 1, b: 2 } },
+-      { tool: "fixtures.add", status: "completed", input: { a: 3, b: 10 } },
+-    ])
+-  })
+-
+-  test("an image result becomes an execute attachment and a marker in the sandbox", async () => {
+-    const out = await run("return await tools.fixtures.screenshot({})")
+-    expect(out.output).toBe("[1 image attached to the result]")
+-    expect(out.attachments).toEqual([{ type: "file", mime: "image/png", url: `data:image/png;base64,${PNG}` }])
+-  })
+-
+-  test("image bytes never enter the sandbox or the model-facing output", async () => {
+-    const out = await run(`
+-      const shot = await tools.fixtures.screenshot({})
+-      return { sawMarker: typeof shot === 'string' && shot.includes('attached'), value: shot }
+-    `)
+-    expect(JSON.parse(out.output)).toEqual({
+-      sawMarker: true,
+-      value: "[1 image attached to the result]",
+-    })
+-    expect(out.output).not.toContain(PNG)
+-    expect(out.attachments).toHaveLength(1)
+-  })
+-
+-  test("attachments accumulate even when the program returns something else", async () => {
+-    const out = await run("await tools.fixtures.screenshot({}); return 'captured'")
+-    expect(out.output).toBe("captured")
+-    expect(out.attachments).toHaveLength(1)
+-  })
+-
+-  test("runs calls in parallel and accumulates every attachment", async () => {
+-    const out = await run(`
+-      const both = await Promise.all([tools.fixtures.screenshot({}), tools.fixtures.screenshot({})])
+-      return 'two shots: ' + both.length
+-    `)
+-    expect(out.output).toBe("two shots: 2")
+-    expect(out.attachments).toHaveLength(2)
+-    expect(out.metadata.toolCalls.map((c) => c.tool)).toEqual(["fixtures.screenshot", "fixtures.screenshot"])
+-  })
+-
+-  test("propagates an MCP isError into the program as a catchable error", async () => {
+-    const out = await run("try { await tools.fixtures.boom({}) } catch (e) { return 'caught: ' + e.message }")
+-    expect(out.output).toBe("caught: kaboom")
+-  })
+-
+-  test("an uncaught MCP error surfaces as a failed execution", async () => {
+-    const error = await runFailed("await tools.fixtures.boom({}); return 'unreachable'")
+-    expect(error.message).toContain("kaboom")
+-  })
+-
+-  test("console output is captured and appended as a Logs section after the result", async () => {
+-    const out = await run(`
+-      console.log("looking up", { name: "world" })
+-      const r = await tools.fixtures.get_text({ name: "world" })
+-      console.warn("got", r)
+-      return r
+-    `)
+-    expect(out.output).toBe('hello world\n\nLogs:\nlooking up {"name":"world"}\n[warn] got hello world')
+-    expect(out.metadata.error).toBeUndefined()
+-  })
+-
+-  test("console output is preserved on the error path", async () => {
+-    const error = await runFailed(`
+-      console.log("before the throw")
+-      await tools.fixtures.boom({})
+-      return "unreachable"
+-    `)
+-    expect(error.message).toContain("kaboom")
+-    expect(error.message).toContain("Logs:\nbefore the throw")
+-  })
+-
+-  test("a program that logs nothing gets no Logs section", async () => {
+-    const out = await run("return 'quiet'")
+-    expect(out.output).toBe("quiet")
+-    expect(out.output).not.toContain("Logs:")
+-  })
+-
+-  test("console does not consume the tool-call metadata (logging is not a tool call)", async () => {
+-    const out = await run("console.log('hi'); console.error('bye'); return 'ok'")
+-    expect(out.output).toBe("ok\n\nLogs:\nhi\n[error] bye")
+-    expect(out.metadata.toolCalls).toEqual([])
+-  })
+-
+-  test("asks permission for each MCP call, keyed by the flat catalog name", async () => {
+-    const asked: string[] = []
+-    const permCtx: Tool.Context = { ...ctx, ask: (req: any) => Effect.sync(() => void asked.push(req.permission)) }
+-    await Effect.runPromise(
+-      tool.execute(
+-        {
+-          code: `
+-            await tools.fixtures.add({ a: 1, b: 1 })
+-            await tools.fixtures.get_text({ name: 'x' })
+-            return 'done'
+-          `,
+-        },
+-        permCtx,
+-      ),
+-    )
+-    expect(asked).toEqual(["fixtures_add", "fixtures_get_text"])
+-  })
+-
+-  test("streams running/completed metadata for child calls over a real transport", async () => {
+-    const snapshots: Array<{ toolCalls: { tool: string; status: string; input?: Record<string, unknown> }[] }> = []
+-    const recordingCtx: Tool.Context = {
+-      ...ctx,
+-      metadata: (val: any) => Effect.sync(() => void snapshots.push(val.metadata)),
+-    }
+-    await Effect.runPromise(
+-      tool.execute({ code: "await tools.fixtures.add({ a: 1, b: 2 }); return 'done'" }, recordingCtx),
+-    )
+-    expect(snapshots).toContainEqual({
+-      toolCalls: [{ tool: "fixtures.add", status: "running", input: { a: 1, b: 2 } }],
+-    })
+-    expect(snapshots).toContainEqual({
+-      toolCalls: [{ tool: "fixtures.add", status: "completed", input: { a: 1, b: 2 } }],
+-    })
+-  })
+-})
+diff --git a/packages/opencode/test/tool/code-mode.test.ts b/packages/opencode/test/tool/code-mode.test.ts
+deleted file mode 100644
+index 34b3faa..0000000
+--- a/packages/opencode/test/tool/code-mode.test.ts
++++ /dev/null
+@@ -1,730 +0,0 @@
+-import { describe, expect, test } from "bun:test"
+-import { CODE_MODE_TOOL, CodeModeTool, Parameters, describeCatalog } from "@/tool/code-mode"
+-import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
+-import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
+-import { Agent } from "@/agent/agent"
+-import { MCP } from "@/mcp"
+-import { Permission } from "@/permission"
+-import { Plugin } from "@/plugin"
+-import { Session } from "@/session/session"
+-import { Tool } from "@/tool/tool"
+-import * as Truncate from "@/tool/truncate"
+-import { MessageID, SessionID } from "@/session/schema"
+-import { Cause, Effect, Exit, Layer, Schema } from "effect"
+-
+-const ctx: Tool.Context = {
+-  sessionID: SessionID.make("ses_code-mode"),
+-  messageID: MessageID.make("msg_code-mode"),
+-  agent: "build",
+-  abort: new AbortController().signal,
+-  callID: "call_code_mode",
+-  messages: [],
+-  metadata: () => Effect.void,
+-  ask: () => Effect.void,
+-}
+-
+-function mcpTool(
+-  name: string,
+-  handler: (args: Record<string, unknown>) => unknown,
+-  inputSchema: Record<string, unknown> = { type: "object", properties: {} },
+-  outputSchema?: Record<string, unknown>,
+-): MCP.McpTool {
+-  return {
+-    def: { name, description: name, inputSchema, ...(outputSchema ? { outputSchema } : {}) } as MCPToolDef,
+-    client: {
+-      callTool: async (params: { arguments?: Record<string, unknown> }) => handler(params.arguments ?? {}),
+-    } as unknown as MCP.McpTool["client"],
+-  }
+-}
+-
+-function harness(input: {
+-  mcpTools: Record<string, MCP.McpTool>
+-  servers: string[]
+-  permission?: PermissionV1.Rule[]
+-  trigger?: Plugin.Interface["trigger"]
+-}) {
+-  return Layer.mergeAll(
+-    Layer.mock(Plugin.Service, {
+-      trigger: input.trigger ?? (((_name, _input, output) => Effect.succeed(output)) as Plugin.Interface["trigger"]),
+-    }),
+-    Layer.mock(Truncate.Service, {
+-      output: (text: string) => Effect.succeed({ content: text, truncated: false as const }),
+-    }),
+-    Layer.mock(Agent.Service, {
+-      get: () => Effect.succeed({ name: "build", permission: input.permission ?? [] } as any),
+-    }),
+-    Layer.mock(Session.Service, {
+-      get: () => Effect.succeed({ permission: [] } as any),
+-    }),
+-    Layer.mock(MCP.Service, {
+-      tools: () => Effect.succeed(input.mcpTools),
+-      clients: () => Effect.succeed(Object.fromEntries(input.servers.map((name) => [name, {} as any]))),
+-    }),
+-  )
+-}
+-
+-function serverNames(mcpTools: Record<string, MCP.McpTool>, servers?: string[]) {
+-  return servers ?? [...new Set(Object.keys(mcpTools).map((key) => key.split("_")[0]!))]
+-}
+-
+-function build(
+-  mcpTools: Record<string, MCP.McpTool>,
+-  servers?: string[],
+-  permission?: PermissionV1.Rule[],
+-  trigger?: Plugin.Interface["trigger"],
+-) {
+-  const names = serverNames(mcpTools, servers)
+-  return Effect.runPromise(
+-    CodeModeTool.pipe(
+-      Effect.flatMap(Tool.init),
+-      Effect.provide(harness({ mcpTools, servers: names, permission, trigger })),
+-    ),
+-  )
+-}
+-
+-function describeFor(mcpTools: Record<string, MCP.McpTool>, servers?: string[], permission: PermissionV1.Rule[] = []) {
+-  return describeCatalog(Permission.visibleTools(mcpTools, permission), serverNames(mcpTools, servers))
+-}
+-
+-// Program failures die at the tool boundary; recover the defect for message assertions.
+-async function failure(effect: Effect.Effect<unknown>) {
+-  const exit = await Effect.runPromise(effect.pipe(Effect.exit))
+-  if (Exit.isSuccess(exit)) throw new Error("expected the tool to fail")
+-  return Cause.squash(exit.cause) as Error
+-}
+-
+-describe("code mode execute", () => {
+-  test("defines execute input with an Effect schema", async () => {
+-    const decode = Schema.decodeUnknownEffect(Parameters)
+-    await expect(Effect.runPromise(decode({ code: "return 1" }))).resolves.toEqual({ code: "return 1" })
+-    await expect(Effect.runPromise(decode({}))).rejects.toThrow()
+-    expect(Schema.toJsonSchemaDocument(Parameters).schema).toMatchObject({
+-      properties: {
+-        code: {
+-          description: "Script body executed by the confined interpreter.",
+-        },
+-      },
+-    })
+-  })
+-
+-  test("groups multi-underscore server names by longest matching prefix", () => {
+-    const description = describeFor({ my_server_do_thing: mcpTool("do_thing", () => "") }, ["my_server"])
+-    expect(description).toContain("- my_server (1 tool)")
+-    expect(description).toContain("tools.my_server.do_thing(")
+-  })
+-
+-  test("groupByServer uses the whole key as the server name when it has no underscore", () => {
+-    const description = describeFor({ standalone: mcpTool("standalone", () => "") }, [])
+-    expect(description).toContain("- standalone (1 tool)")
+-    expect(description).toContain("tools.standalone.standalone(")
+-  })
+-
+-  test("describeCatalog carries the raw MCP schemas for rendering", () => {
+-    const description = describeFor(
+-      {
+-        weather_current: mcpTool(
+-          "current",
+-          () => "",
+-          { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+-          { type: "object", properties: { tempC: { type: "number" } }, required: ["tempC"] },
+-        ),
+-      },
+-      ["weather"],
+-    )
+-    expect(description).toContain(
+-      "tools.weather.current(input: {\n  city: string,\n}): Promise<{\n  tempC: number,\n}>",
+-    )
+-  })
+-
+-  test("the static base description carries no catalog; the registry appends it", async () => {
+-    const tool = await build({ github_list_issues: mcpTool("list_issues", () => "") })
+-    expect(tool.id).toBe(CODE_MODE_TOOL)
+-    expect(tool.description).toBe("Run a confined orchestration script with access to connected MCP tools.")
+-    expect(tool.description).not.toContain("Available tools")
+-    expect(tool.description).not.toContain("list_issues")
+-  })
+-
+-  test("small catalogs inline every full signature in the appended catalog", () => {
+-    const description = describeFor({
+-      github_create_issue: mcpTool("create_issue", () => "", {
+-        type: "object",
+-        properties: { title: { type: "string" }, body: { type: "string" } },
+-        required: ["title"],
+-      }),
+-      github_list_issues: mcpTool("list_issues", () => ""),
+-      linear_search: mcpTool("search", () => ""),
+-    })
+-
+-    expect(description).toContain("Available tools (COMPLETE list")
+-    expect(description).toContain("- github (2 tools)")
+-    expect(description).toContain("- linear (1 tool)")
+-    expect(description).toContain(
+-      "tools.github.create_issue(input: {\n  title: string,\n  body?: string,\n}): Promise<unknown>",
+-    )
+-    expect(description).toContain("tools.github.list_issues(")
+-    expect(description).toContain("tools.linear.search(")
+-    expect(description).toContain("tools.linear.search(input: {}): Promise<unknown>")
+-    expect(description).not.toContain("$codemode")
+-    expect(description).not.toContain("Browse one namespace")
+-    expect(description).toContain("## Workflow")
+-    expect(description).toContain("1. Pick a tool from the list under `## Available tools`")
+-    expect(description).not.toContain("JSON.parse(res)")
+-    expect(description).toContain("check that it is a non-null object and not an array")
+-    expect(description).toContain("Return only the fields you need")
+-    expect(description).not.toContain("total_count")
+-  })
+-
+-  test("signatures render the declared outputSchema as the return type", () => {
+-    const description = describeFor({
+-      weather_current: mcpTool(
+-        "current",
+-        () => "",
+-        { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+-        {
+-          type: "object",
+-          properties: { tempC: { type: "number" }, summary: { type: "string" } },
+-          required: ["tempC"],
+-        },
+-      ),
+-    })
+-    expect(description).toContain(
+-      "tools.weather.current(input: {\n  city: string,\n}): Promise<{\n  tempC: number,\n  summary?: string,\n}>",
+-    )
+-  })
+-
+-  test("large catalogs inline a budgeted PARTIAL list plus runtime search", async () => {
+-    const tools: Record<string, MCP.McpTool> = {}
+-    const filler = "a searchable description of this operation that consumes catalog budget ".repeat(3)
+-    for (let i = 0; i < 150; i++) {
+-      tools[`alpha_op_${i}`] = {
+-        def: {
+-          name: `op_${i}`,
+-          description: `${filler}${i}`,
+-          inputSchema: { type: "object", properties: { value: { type: "string" }, count: { type: "number" } } },
+-        } as MCPToolDef,
+-        client: { callTool: async () => ({ content: [] }) } as unknown as MCP.McpTool["client"],
+-      }
+-    }
+-    tools["zeta_only_tool"] = mcpTool("only_tool", () => "", {
+-      type: "object",
+-      properties: { topic: { type: "string", description: "Subject to look up" } },
+-      required: ["topic"],
+-    })
+-    const description = describeFor(tools, ["alpha", "zeta"])
+-
+-    expect(description).toContain("Available tools (PARTIAL - ")
+-    expect(description).toMatch(/- alpha \(150 tools, \d+ shown\)/)
+-    expect(description).toContain("- zeta (1 tool)\n")
+-    expect(description).toContain(
+-      "tools.zeta.only_tool(input: {\n  /** Subject to look up */\n  topic: string,\n}): Promise<unknown>",
+-    )
+-    expect(description).toContain("tools.$codemode.search(")
+-    expect(description).toContain("  limit?: number,\n  offset?: number,")
+-    expect(description).toContain("  remaining: number,\n  next: {")
+-    expect(description).toContain("      offset: number,\n    } | null,")
+-    expect(description).toContain(
+-      '1. If needed, discover tools: `return await tools.$codemode.search({ query: "<intent + key nouns>" })`.',
+-    )
+-    expect(description).toContain(
+-      '- Browse one namespace: `await tools.$codemode.search({ query: "", namespace: "<name>" })`.',
+-    )
+-    expect(description).not.toContain("total_count")
+-    expect(description).toContain("tools.alpha.op_0(")
+-    expect(description).not.toContain("tools.alpha.op_99(")
+-
+-    const tool = await build(tools, ["alpha", "zeta"])
+-    const out = await Effect.runPromise(
+-      tool.execute({ code: "return await tools.$codemode.search({ query: 'only tool', limit: 3, offset: 0 })" }, ctx),
+-    )
+-    const result = JSON.parse(out.output)
+-    expect(result.items.map((i: any) => i.path)).toContain("tools.zeta.only_tool")
+-    expect(result).toMatchObject({ remaining: 0, next: null })
+-    expect(result.items[0].signature).toContain("tools.")
+-    const signature = result.items.find((i: any) => i.path === "tools.zeta.only_tool").signature
+-    expect(signature).toContain("tools.zeta.only_tool(input: {\n")
+-    expect(signature).toContain("  /** Subject to look up */\n  topic: string")
+-    expect(description).toContain("/** Subject to look up */")
+-    expect(out.metadata.toolCalls).toEqual([
+-      { tool: "$codemode.search", status: "completed", input: { query: "only tool", limit: 3, offset: 0 } },
+-    ])
+-  })
+-
+-  test("runs plain JavaScript and returns the value as text", async () => {
+-    const tool = await build({})
+-    const output = await Effect.runPromise(tool.execute({ code: "return 1 + 2" }, ctx))
+-    expect(output.output).toBe("3")
+-    expect(output.metadata.toolCalls).toEqual([])
+-  })
+-
+-  test("Object.keys(tools) enumerates the MCP server and CodeMode namespaces", async () => {
+-    const tool = await build({
+-      github_list_issues: mcpTool("list_issues", () => ""),
+-      linear_search: mcpTool("search", () => ""),
+-    })
+-    const output = await Effect.runPromise(
+-      tool.execute(
+-        { code: "const namespaces = Object.keys(tools); return { namespaces, count: namespaces.length }" },
+-        ctx,
+-      ),
+-    )
+-    expect(JSON.parse(output.output)).toEqual({ namespaces: ["github", "linear", "$codemode"], count: 3 })
+-  })
+-
+-  test("calls a namespaced MCP tool and flows its text result back into the program", async () => {
+-    const seen: Record<string, unknown>[] = []
+-    const tool = await build({
+-      greeter_hello: mcpTool("hello", (args) => {
+-        seen.push(args)
+-        return { content: [{ type: "text", text: `hello ${args.name}` }] }
+-      }),
+-    })
+-
+-    const output = await Effect.runPromise(
+-      tool.execute({ code: "const r = await tools.greeter.hello({ name: 'world' }); return r.toUpperCase()" }, ctx),
+-    )
+-
+-    expect(seen).toEqual([{ name: "world" }])
+-    expect(output.output).toBe("HELLO WORLD")
+-    expect(output.metadata.toolCalls).toEqual([
+-      { tool: "greeter.hello", status: "completed", input: { name: "world" } },
+-    ])
+-  })
+-
+-  test("exposes structured content as native data and composes multiple calls", async () => {
+-    const tool = await build({
+-      math_add: mcpTool("add", (args) => ({
+-        content: [],
+-        structuredContent: { sum: (args.a as number) + (args.b as number) },
+-      })),
+-    })
+-
+-    const output = await Effect.runPromise(
+-      tool.execute(
+-        {
+-          code: `
+-            const first = await tools.math.add({ a: 1, b: 2 })
+-            const second = await tools.math.add({ a: first.sum, b: 10 })
+-            return { total: second.sum }
+-          `,
+-        },
+-        ctx,
+-      ),
+-    )
+-
+-    expect(JSON.parse(output.output)).toEqual({ total: 13 })
+-    expect(output.metadata.toolCalls).toEqual([
+-      { tool: "math.add", status: "completed", input: { a: 1, b: 2 } },
+-      { tool: "math.add", status: "completed", input: { a: 3, b: 10 } },
+-    ])
+-  })
+-
+-  test("runs tool calls in parallel with Promise.all", async () => {
+-    const tool = await build({
+-      echo_one: mcpTool("one", () => ({ content: [{ type: "text", text: "1" }] })),
+-      echo_two: mcpTool("two", () => ({ content: [{ type: "text", text: "2" }] })),
+-    })
+-
+-    const output = await Effect.runPromise(
+-      tool.execute(
+-        { code: "const [a, b] = await Promise.all([tools.echo.one({}), tools.echo.two({})]); return a + b" },
+-        ctx,
+-      ),
+-    )
+-
+-    expect(output.output).toBe("12")
+-    expect(output.metadata.toolCalls.map((c) => c.tool).sort()).toEqual(["echo.one", "echo.two"])
+-    expect(output.metadata.toolCalls.every((c) => c.status === "completed")).toBe(true)
+-  })
+-
+-  test("a program failure fails the tool with a readable error", async () => {
+-    const tool = await build({})
+-    const error = await failure(tool.execute({ code: "throw new Error('boom')" }, ctx))
+-    expect(error.message).toBe("Uncaught: boom")
+-  })
+-
+-  test("reports an unknown tool as a failed execution", async () => {
+-    const tool = await build({ known_tool: mcpTool("tool", () => "ok") })
+-    const error = await failure(tool.execute({ code: "return await tools.known.missing({})" }, ctx))
+-    expect(error.message).toContain("Unknown tool 'known.missing'")
+-  })
+-
+-  test("propagates an MCP tool error into the program as a catchable failure", async () => {
+-    const tool = await build({
+-      bad_tool: mcpTool("tool", () => ({ isError: true, content: [{ type: "text", text: "server exploded" }] })),
+-    })
+-    const output = await Effect.runPromise(
+-      tool.execute({ code: "try { await tools.bad.tool({}) } catch (e) { return 'caught: ' + e.message }" }, ctx),
+-    )
+-    expect(output.output).toBe("caught: server exploded")
+-  })
+-
+-  test("asks permission before each child tool call", async () => {
+-    const asked: unknown[] = []
+-    const permissionCtx: Tool.Context = { ...ctx, ask: (req) => Effect.sync(() => void asked.push(req)) }
+-    const ok = () => ({ content: [{ type: "text", text: "ok" }] })
+-    const tool = await build({ a_tool: mcpTool("a", ok), b_tool: mcpTool("b", ok) })
+-
+-    await Effect.runPromise(
+-      tool.execute({ code: "await tools.a.tool({}); await tools.b.tool({}); return 'done'" }, permissionCtx),
+-    )
+-
+-    expect(asked.map((req: any) => req.permission)).toEqual(["a_tool", "b_tool"])
+-  })
+-
+-  test("a denied permission fails the child call with a catchable message, not the whole execute", async () => {
+-    const denyCtx: Tool.Context = { ...ctx, ask: () => Effect.die(new Error("permission denied by user")) }
+-    const called: string[] = []
+-    const tool = await build({
+-      a_tool: mcpTool("a", () => {
+-        called.push("a")
+-        return { content: [{ type: "text", text: "ok" }] }
+-      }),
+-    })
+-
+-    const output = await Effect.runPromise(
+-      tool.execute({ code: "try { await tools.a.tool({}) } catch (e) { return 'denied: ' + e.message }" }, denyCtx),
+-    )
+-
+-    expect(output.output).toBe("denied: permission denied by user")
+-    expect(output.metadata.error).toBeUndefined()
+-    expect(called).toEqual([])
+-    expect(output.metadata.toolCalls).toEqual([{ tool: "a.tool", status: "error" }])
+-  })
+-
+-  test("child calls fire plugin tool.execute hooks with the MCP key and synthetic parent/N call ids", async () => {
+-    const events: { name: string; input: any; output: any }[] = []
+-    const trigger = ((name: unknown, input: unknown, output: unknown) =>
+-      Effect.sync(() => {
+-        events.push({ name: name as string, input, output })
+-        return output
+-      })) as Plugin.Interface["trigger"]
+-    const tool = await build(
+-      {
+-        a_tool: mcpTool("a", () => ({ content: [{ type: "text", text: "one" }] })),
+-        b_tool: mcpTool("b", () => ({ content: [{ type: "text", text: "two" }] })),
+-      },
+-      undefined,
+-      undefined,
+-      trigger,
+-    )
+-
+-    const out = await Effect.runPromise(
+-      tool.execute({ code: "await tools.a.tool({ x: 1 }); await tools.b.tool({}); return 'done'" }, ctx),
+-    )
+-
+-    expect(out.output).toBe("done")
+-    expect(events.map((e) => [e.name, e.input.tool, e.input.callID])).toEqual([
+-      ["tool.execute.before", "a_tool", "call_code_mode/1"],
+-      ["tool.execute.after", "a_tool", "call_code_mode/1"],
+-      ["tool.execute.before", "b_tool", "call_code_mode/2"],
+-      ["tool.execute.after", "b_tool", "call_code_mode/2"],
+-    ])
+-    const [before, after] = events
+-    expect(before!.input.sessionID).toBe(ctx.sessionID)
+-    expect(before!.output).toEqual({ args: { x: 1 } })
+-    expect(after!.input.args).toEqual({ x: 1 })
+-    expect(after!.output).toEqual({ content: [{ type: "text", text: "one" }] })
+-  })
+-
+-  test("a failing before hook fails only that child call as a catchable in-program error", async () => {
+-    const trigger = ((name: unknown, input: any, output: unknown) => {
+-      if (name === "tool.execute.before" && input.tool === "a_tool") return Effect.die(new Error("hook exploded"))
+-      return Effect.succeed(output)
+-    }) as Plugin.Interface["trigger"]
+-    const called: string[] = []
+-    const record = (name: string) => () => {
+-      called.push(name)
+-      return { content: [{ type: "text", text: "ok" }] }
+-    }
+-    const tool = await build(
+-      { a_tool: mcpTool("a", record("a")), b_tool: mcpTool("b", record("b")) },
+-      undefined,
+-      undefined,
+-      trigger,
+-    )
+-
+-    const out = await Effect.runPromise(
+-      tool.execute(
+-        {
+-          code: `
+-            let caught
+-            try { await tools.a.tool({}) } catch (e) { caught = e.message }
+-            const r = await tools.b.tool({})
+-            return caught + " / " + r
+-          `,
+-        },
+-        ctx,
+-      ),
+-    )
+-
+-    expect(out.metadata.error).toBeUndefined()
+-    expect(out.output).toBe("hook exploded / ok")
+-    expect(called).toEqual(["b"])
+-  })
+-
+-  test("streams live per-call metadata as a call starts and finishes", async () => {
+-    const snapshots: Array<{ toolCalls: { tool: string; status: string; input?: Record<string, unknown> }[] }> = []
+-    const recordingCtx: Tool.Context = {
+-      ...ctx,
+-      metadata: (val: any) => Effect.sync(() => void snapshots.push(val.metadata)),
+-    }
+-    const tool = await build({ greeter_hello: mcpTool("hello", () => ({ content: [{ type: "text", text: "hi" }] })) })
+-
+-    await Effect.runPromise(
+-      tool.execute({ code: "await tools.greeter.hello({ name: 'Ada' }); return 'done'" }, recordingCtx),
+-    )
+-
+-    expect(snapshots).toContainEqual({
+-      toolCalls: [{ tool: "greeter.hello", status: "running", input: { name: "Ada" } }],
+-    })
+-    expect(snapshots).toContainEqual({
+-      toolCalls: [{ tool: "greeter.hello", status: "completed", input: { name: "Ada" } }],
+-    })
+-  })
+-
+-  test("marks a failed child call as error in the live metadata", async () => {
+-    const snapshots: Array<{ toolCalls: { tool: string; status: string; input?: Record<string, unknown> }[] }> = []
+-    const recordingCtx: Tool.Context = {
+-      ...ctx,
+-      metadata: (val: any) => Effect.sync(() => void snapshots.push(val.metadata)),
+-    }
+-    const tool = await build({
+-      bad_tool: mcpTool("tool", () => ({ isError: true, content: [{ type: "text", text: "boom" }] })),
+-    })
+-
+-    await Effect.runPromise(
+-      tool.execute(
+-        { code: "try { await tools.bad.tool({ reason: 'test' }) } catch (e) { return 'caught' }" },
+-        recordingCtx,
+-      ),
+-    )
+-
+-    expect(snapshots).toContainEqual({ toolCalls: [{ tool: "bad.tool", status: "error", input: { reason: "test" } }] })
+-  })
+-
+-  test("accumulates stripped media as execute attachments the sandbox never sees", async () => {
+-    const tool = await build({
+-      shot_take: mcpTool("take", () => ({
+-        content: [{ type: "image", data: "PNGDATA", mimeType: "image/png" }],
+-        structuredContent: { name: "shot.png" },
+-      })),
+-    })
+-
+-    const out = await Effect.runPromise(tool.execute({ code: "return await tools.shot.take({})" }, ctx))
+-    expect(JSON.parse(out.output)).toEqual({ name: "shot.png" })
+-    expect(out.attachments).toEqual([{ type: "file", mime: "image/png", url: "data:image/png;base64,PNGDATA" }])
+-    expect(out.output).not.toContain("PNGDATA")
+-  })
+-
+-  test("a media-only result returns a text marker so the program knows it succeeded", async () => {
+-    const tool = await build({
+-      shot_take: mcpTool("take", () => ({ content: [{ type: "image", data: "PNGDATA", mimeType: "image/png" }] })),
+-    })
+-    const out = await Effect.runPromise(tool.execute({ code: "return await tools.shot.take({})" }, ctx))
+-    expect(out.output).toBe("[1 image attached to the result]")
+-    expect(out.attachments).toEqual([{ type: "file", mime: "image/png", url: "data:image/png;base64,PNGDATA" }])
+-  })
+-
+-  test("media-only markers distinguish all-image from mixed attachments", async () => {
+-    const tool = await build({
+-      media_images: mcpTool("images", () => ({
+-        content: [
+-          { type: "image", data: "PNG1", mimeType: "image/png" },
+-          { type: "image", data: "PNG2", mimeType: "image/png" },
+-        ],
+-      })),
+-      media_mixed: mcpTool("mixed", () => ({
+-        content: [
+-          { type: "image", data: "PNG3", mimeType: "image/png" },
+-          { type: "resource", resource: { uri: "file:///tmp/report.pdf", mimeType: "application/pdf", blob: "PDF1" } },
+-        ],
+-      })),
+-    })
+-    const out = await Effect.runPromise(
+-      tool.execute(
+-        {
+-          code: `
+-            const images = await tools.media.images({})
+-            const mixed = await tools.media.mixed({})
+-            return { images, mixed }
+-          `,
+-        },
+-        ctx,
+-      ),
+-    )
+-
+-    expect(JSON.parse(out.output)).toEqual({
+-      images: "[2 images attached to the result]",
+-      mixed: "[2 files attached to the result]",
+-    })
+-    expect(out.output).not.toContain("PNG")
+-    expect(out.attachments).toEqual([
+-      { type: "file", mime: "image/png", url: "data:image/png;base64,PNG1" },
+-      { type: "file", mime: "image/png", url: "data:image/png;base64,PNG2" },
+-      { type: "file", mime: "image/png", url: "data:image/png;base64,PNG3" },
+-      { type: "file", mime: "application/pdf", url: "data:application/pdf;base64,PDF1", filename: "report.pdf" },
+-    ])
+-  })
+-
+-  test("resource links flow to the program as text, never as attachments", async () => {
+-    const tool = await build({
+-      docs_find: mcpTool("find", () => ({
+-        content: [
+-          {
+-            type: "resource_link",
+-            uri: "https://example.com/guide.pdf",
+-            name: "guide.pdf",
+-            mimeType: "application/pdf",
+-          },
+-          { type: "resource_link", uri: "file:///tmp/notes.md", name: "notes.md" },
+-        ],
+-      })),
+-    })
+-    const out = await Effect.runPromise(tool.execute({ code: "return await tools.docs.find({})" }, ctx))
+-
+-    expect(out.output).toBe("guide.pdf: https://example.com/guide.pdf\nnotes.md: file:///tmp/notes.md")
+-    expect(out.attachments).toBeUndefined()
+-  })
+-
+-  test("attachments still flow when the program returns something else entirely", async () => {
+-    const tool = await build({
+-      shot_take: mcpTool("take", () => ({ content: [{ type: "image", data: "PNGDATA", mimeType: "image/png" }] })),
+-    })
+-    const out = await Effect.runPromise(tool.execute({ code: "await tools.shot.take({}); return 'captured'" }, ctx))
+-    expect(out.output).toBe("captured")
+-    expect(out.attachments).toHaveLength(1)
+-  })
+-
+-  test("isolates the sandbox from host globals", async () => {
+-    const tool = await build({})
+-    const error = await failure(tool.execute({ code: "return process.env" }, ctx))
+-    expect(error.message).toContain("process")
+-  })
+-
+-  test("cancelling via ctx.abort interrupts the running program", async () => {
+-    const controller = new AbortController()
+-    const tool = await build({
+-      host_trigger: mcpTool("trigger", () => {
+-        controller.abort()
+-        return new Promise(() => {})
+-      }),
+-    })
+-    const output = await Effect.runPromise(
+-      tool.execute(
+-        { code: "try { await tools.host.trigger({}) } catch {} while (true) {}" },
+-        { ...ctx, abort: controller.signal },
+-      ),
+-    )
+-    expect(output.output).toBe("Execution cancelled.")
+-    expect(output.metadata.error).toBe(true)
+-    expect(output.metadata.toolCalls).toEqual([{ tool: "host.trigger", status: "running" }])
+-  })
+-
+-  test("a pre-aborted signal cancels before the program runs", async () => {
+-    const controller = new AbortController()
+-    controller.abort()
+-    const ran: string[] = []
+-    const tool = await build({ host_touch: mcpTool("touch", () => (ran.push("called"), "ok")) })
+-    const output = await Effect.runPromise(
+-      tool.execute({ code: "return await tools.host.touch({})" }, { ...ctx, abort: controller.signal }),
+-    )
+-    expect(output.output).toBe("Execution cancelled.")
+-    expect(ran).toEqual([])
+-  })
+-
+-  test("leaves oversized results to OpenCode's native tool-output truncation", async () => {
+-    const tool = await build({})
+-    const output = await Effect.runPromise(tool.execute({ code: "return 'x'.repeat(40000)" }, ctx))
+-    expect(output.metadata.error).toBeUndefined()
+-    expect(output.output).not.toContain("[result truncated:")
+-    expect(output.output.length).toBeGreaterThanOrEqual(40_000)
+-  })
+-
+-  test("appends logs after the result on success and after the message on error", async () => {
+-    const tool = await build({})
+-
+-    const ok = await Effect.runPromise(
+-      tool.execute({ code: "console.log('step one'); console.warn('careful'); return 'done'" }, ctx),
+-    )
+-    expect(ok.output).toBe("done\n\nLogs:\nstep one\n[warn] careful")
+-
+-    const error = await failure(tool.execute({ code: "console.log('before the throw'); throw new Error('boom')" }, ctx))
+-    expect(error.message).toContain("Uncaught: boom")
+-    expect(error.message).toContain("Logs:\nbefore the throw")
+-  })
+-})
+-
+-describe("code mode permission visibility", () => {
+-  const deny = (permission: string): PermissionV1.Rule => ({ permission, pattern: "*", action: "deny" })
+-  const askRule = (permission: string): PermissionV1.Rule => ({ permission, pattern: "*", action: "ask" })
+-  const ok = () => ({ content: [{ type: "text", text: "ok" }] })
+-
+-  test("a hard-denied tool never enters the catalog or its search index", () => {
+-    const mcpTools = {
+-      github_create_issue: mcpTool("create_issue", ok),
+-      github_list_issues: mcpTool("list_issues", ok),
+-    }
+-    const description = describeFor(mcpTools, ["github"], [deny("github_create_issue")])
+-    expect(description).toContain("tools.github.list_issues(")
+-    expect(description).not.toContain("create_issue")
+-    expect(description).toContain("- github (1 tool)")
+-  })
+-
+-  test("an ask-level tool stays fully visible in the catalog", () => {
+-    const mcpTools = {
+-      github_create_issue: mcpTool("create_issue", ok),
+-      github_list_issues: mcpTool("list_issues", ok),
+-    }
+-    const description = describeFor(mcpTools, ["github"], [askRule("github_create_issue")])
+-    expect(description).toContain("tools.github.create_issue(")
+-    expect(description).toContain("tools.github.list_issues(")
+-    expect(description).toContain("- github (2 tools)")
+-  })
+-
+-  test("a hard-denied tool is not dispatchable: the program gets the unknown-tool diagnostic", async () => {
+-    const called: string[] = []
+-    const tool = await build(
+-      {
+-        github_create_issue: mcpTool("create_issue", () => {
+-          called.push("create_issue")
+-          return ok()
+-        }),
+-        github_list_issues: mcpTool("list_issues", ok),
+-      },
+-      ["github"],
+-      [deny("github_create_issue")],
+-    )
+-
+-    const denied = await failure(tool.execute({ code: "return await tools.github.create_issue({ title: 'x' })" }, ctx))
+-    expect(denied.message).toContain("Unknown tool 'github.create_issue'")
+-    expect(denied.message).not.toContain("permission")
+-    expect(called).toEqual([])
+-
+-    const allowed = await Effect.runPromise(tool.execute({ code: "return await tools.github.list_issues({})" }, ctx))
+-    expect(allowed.metadata.error).toBeUndefined()
+-    expect(allowed.output).toBe("ok")
+-  })
+-
+-  test("an ask-level tool remains callable and still prompts via ctx.ask", async () => {
+-    const asked: string[] = []
+-    const askCtx: Tool.Context = { ...ctx, ask: (req) => Effect.sync(() => void asked.push(req.permission)) }
+-    const tool = await build(
+-      { github_list_issues: mcpTool("list_issues", ok) },
+-      ["github"],
+-      [askRule("github_list_issues")],
+-    )
+-    const out = await Effect.runPromise(tool.execute({ code: "return await tools.github.list_issues({})" }, askCtx))
+-    expect(out.output).toBe("ok")
+-    expect(asked).toEqual(["github_list_issues"])
+-  })
+-
+-  test("Permission.visibleTools hides only hard denies, matching Permission.disabled", () => {
+-    const tools = { a_tool: 1, b_tool: 2, c_tool: 3 }
+-    const visible = Permission.visibleTools(tools, [
+-      deny("a_tool"),
+-      askRule("b_tool"),
+-      { permission: "c_tool", pattern: "something", action: "deny" },
+-    ])
+-    expect(Object.keys(visible)).toEqual(["b_tool", "c_tool"])
+-  })
+-})
+diff --git a/packages/opencode/test/tool/registry.test.ts b/packages/opencode/test/tool/registry.test.ts
+index c8c5fac..8a56db6 100644
+--- a/packages/opencode/test/tool/registry.test.ts
++++ b/packages/opencode/test/tool/registry.test.ts
+@@ -19,8 +19,6 @@ import { MessageID, SessionID } from "@/session/schema"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { ModelV2 } from "@opencode-ai/core/model"
+-import { MCP } from "@/mcp"
+-import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
+ 
+ const configLayer = TestConfig.layer({
+   directories: () => InstanceState.directory.pipe(Effect.map((dir) => [path.join(dir, ".opencode")])),
+@@ -57,42 +55,6 @@ const replacements = [
+ ] as const
+ 
+ const it = testEffect(LayerNode.compile(root, replacements))
+-const withCodeMode = testEffect(
+-  LayerNode.compile(root, [
+-    [Config.node, configLayer],
+-    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalCodeMode: true })],
+-    [
+-      MCP.node,
+-      Layer.mock(MCP.Service, {
+-        tools: () =>
+-          Effect.succeed({
+-            weather_current: {
+-              def: {
+-                name: "current",
+-                description: "current weather",
+-                inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+-              } as MCPToolDef,
+-              client: {} as MCP.McpTool["client"],
+-            },
+-          }),
+-        clients: () => Effect.succeed({ weather: {} as any }),
+-      }),
+-    ],
+-  ]),
+-)
+-const withEmptyCodeMode = testEffect(
+-  LayerNode.compile(root, [
+-    [Config.node, configLayer],
+-    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalCodeMode: true })],
+-    [
+-      MCP.node,
+-      Layer.mock(MCP.Service, {
+-        tools: () => Effect.succeed({}),
+-        clients: () => Effect.succeed({}),
+-      }),
+-    ],
+-  ]),
+-)
+ const withBrokenPlugin = testEffect(LayerNode.compile(root, [...replacements, [Plugin.node, brokenPluginLayer]]))
+ 
+ afterEach(async () => {
+@@ -109,7 +71,7 @@ describe("tool.registry", () => {
+     }),
+   )
+ 
+-  it.instance("does not expose execute unless code mode is enabled", () =>
++  it.instance("does not expose the execute tool", () =>
+     Effect.gen(function* () {
+       const registry = yield* ToolRegistry.Service
+       const ids = yield* registry.ids()
+@@ -118,38 +80,6 @@ describe("tool.registry", () => {
+     }),
+   )
+ 
+-  withCodeMode.instance("exposes execute when code mode is enabled", () =>
+-    Effect.gen(function* () {
+-      const registry = yield* ToolRegistry.Service
+-      const agents = yield* Agent.Service
+-      const ids = yield* registry.ids()
+-      const tools = yield* registry.tools({
+-        providerID: ProviderV2.ID.opencode,
+-        modelID: ModelV2.ID.make("test"),
+-        agent: yield* agents.defaultInfo(),
+-      })
+-      const execute = tools.find((tool) => tool.id === "execute")
+-
+-      expect(ids).toContain("execute")
+-      expect(tools.map((tool) => tool.id)).toContain("execute")
+-      expect(execute?.description).toContain("tools.weather.current(input: {\n  city: string,\n})")
+-    }),
+-  )
+-
+-  withEmptyCodeMode.instance("does not expose execute when code mode has no visible tools", () =>
+-    Effect.gen(function* () {
+-      const registry = yield* ToolRegistry.Service
+-      const agents = yield* Agent.Service
+-      const tools = yield* registry.tools({
+-        providerID: ProviderV2.ID.opencode,
+-        modelID: ModelV2.ID.make("test"),
+-        agent: yield* agents.defaultInfo(),
+-      })
+-
+-      expect(tools.map((tool) => tool.id)).not.toContain("execute")
+-    }),
+-  )
+-
+   it.instance("hides task background parameter unless experimental background subagents are enabled", () =>
+     Effect.gen(function* () {
+       const registry = yield* ToolRegistry.Service
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index e1f554f..c633c8c 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -1700,9 +1700,6 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
+         <Match when={display() === "task"}>
+           <Task {...toolprops} />
+         </Match>
+-        <Match when={display() === "execute"}>
+-          <Execute {...toolprops} />
+-        </Match>
+         <Match when={display() === "apply_patch"}>
+           <ApplyPatch {...toolprops} />
+         </Match>
+@@ -2262,66 +2259,6 @@ export function formatCompletedSubagentDetail(toolcalls: number, duration: strin
+   return `${formatSubagentToolcalls(toolcalls)} · ${duration}`
+ }
+ 
+-type ExecuteCall = { tool: string; status: "running" | "completed" | "error"; input?: Record<string, unknown> }
+-
+-function executeCalls(value: unknown): ExecuteCall[] {
+-  if (!Array.isArray(value)) return []
+-  return value.flatMap((call) => {
+-    const item = recordValue(call)
+-    const tool = stringValue(item?.tool)
+-    const status = stringValue(item?.status)
+-    if (!tool || !status || !["running", "completed", "error"].includes(status)) return []
+-    return [{ tool, status: status as ExecuteCall["status"], input: recordValue(item?.input) }]
+-  })
+-}
+-
+-// The `execute` tool streams child tool calls through metadata, not a child session like Task.
+-function Execute(props: ToolProps) {
+-  const ctx = use()
+-  const { theme } = useTheme()
+-  const isLoading = createMemo(() => props.part.state.status === "pending" || props.part.state.status === "running")
+-  const calls = createMemo(() => executeCalls(props.metadata.toolCalls))
+-  const output = createMemo(() => stripAnsi(props.output?.trim() ?? ""))
+-  const hasRuntimeError = createMemo(() => props.metadata.error === true)
+-  const outputPreview = createMemo(() => collapseToolOutput(output(), 4, 4 * Math.max(20, ctx.width - 6)).output)
+-  const showOutput = createMemo(() => output() && hasRuntimeError())
+-  const content = createMemo(() => {
+-    const lines = ["execute"]
+-    for (const call of calls()) {
+-      const args = input(call.input ?? {})
+-      lines.push(`↳ ${call.tool}${args ? ` ${args}` : ""}${call.status === "error" ? " (failed)" : ""}`)
+-    }
+-    return lines.join("\n")
+-  })
+-
+-  return (
+-    <>
+-      <InlineTool
+-        icon={hasRuntimeError() ? "✗" : props.part.state.status === "completed" ? "✓" : "│"}
+-        color={hasRuntimeError() ? theme.error : undefined}
+-        spinner={isLoading()}
+-        pending="execute"
+-        complete={true}
+-        part={props.part}
+-      >
+-        {content()}
+-      </InlineTool>
+-      <Show when={showOutput()}>
+-        <box paddingLeft={3}>
+-          <For each={outputPreview().split("\n")}>
+-            {(line, index) => (
+-              <text paddingLeft={3} fg={theme.error}>
+-                {index() === 0 ? "↳ " : "  "}
+-                {line}
+-              </text>
+-            )}
+-          </For>
+-        </box>
+-      </Show>
+-    </>
+-  )
+-}
+-
+ function Edit(props: ToolProps) {
+   const ctx = use()
+   const { theme, syntax } = useTheme()
+@@ -2572,7 +2509,6 @@ const toolDisplays = new Set([
+   "todowrite",
+   "question",
+   "skill",
+-  "execute",
+ ])
+ 
+ export function toolDisplay(tool: string) {
