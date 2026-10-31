@@ -4,7 +4,7 @@
 | --- | --- |
 | Plan ID | 0009 |
 | File | `docs/plan/0009-opencode-provider-only.md` |
-| Status | In progress |
+| Status | Completed |
 | Created | 2026-10-31 |
 | Repository | `azrialwork/openick` |
 | Upstream | `anomalyco/opencode` |
@@ -177,12 +177,14 @@ completion record).
 | Date | Amendment |
 | --- | --- |
 | 2026-10-31 | Plan created. |
+| 2026-10-31 | Test scope refined during implementation, recorded here per the governance rule. Beyond the provider and plugin suites named in Section 4.1, the session and server suites carried their own copies of the config-defined test provider; they were migrated to the same harness as the rest of the tree (the `opencode` provider pointed at the fake LLM server, model `opencode/test-model` added as a free model to the test fixture catalog). Tests whose premise was a removed provider or SDK were deleted wherever they sat: the recorded native-runtime scenarios file, the per-SDK payload tests in the LLM stream suite, the non-`opencode` session-header cases, and one small-model test whose premise (a preferred-family model being active in the free catalog) no longer holds — in the live registry every `gpt-nano` family model is paid and `grok-code` is marked deprecated today, so the Locked Decision 9 priority is retained as a data-driven fallback that resolves whenever the registry offers such a model again. No product behavior changed by these test decisions. |
+| 2026-10-31 | Completion record (Auditor). Gate 1: typechecks clean in core, opencode, and tui; provider and plugin suites 713 pass / 0 fail; every other suite shows no failure beyond the pre-existing baseline of the pre-plan tree (verified by stash comparison). Gate 2: local `--single` build is 151,083,184 bytes; its `opencode models` output is exactly the eight active free models the Locked Decision 1 rule yields on the live registry (46 free in total, the rest deprecated); a configuration defining other providers changes nothing; the mock round trip and the PTY TUI render pass, the TUI resolving its default model to the free `big-pickle` with no key configured. Gate 3: the thirteen-patch stack applies cleanly on a pristine checkout of the pin and reproduces the development tree; `materialize.sh` completes with a 13-patch manifest and `verify-branding.sh` passes. One local materialize run failed inside patch `0004` with a racy-index `does not match index` error from the fresh shallow clone; a retry completed cleanly and the stack test is unaffected, so this is recorded as a local environment flake, not a patch defect. Gate 4: `validate` run `41194305148` green. Gate 5: release run `41194376767` and `build-android` run `41194503802` republished `v1.19.5` with exactly 10 assets; fresh downloads match `SHA256SUMS` (9 of 9 listed files OK); the manifest lists 13 patches; the published Linux x64 binary is 151,083,184 bytes (Plan 0008: 163,043,504; −11,960,320), reports 1.19.5, and its `opencode models` output matches the rule; the Android binary is 142,811,512 bytes (was 154,739,064). All acceptance criteria met. |
 
 ## 7. Acceptance Criteria
 
-- [ ] Patch `0013-opencode-free-models-only.patch` is in the stack
+- [x] Patch `0013-opencode-free-models-only.patch` is in the stack
   and the development-tree gate (Gate 1) passes.
-- [ ] The local build gate (Gate 2) passes.
-- [ ] The repository gates (Gate 3) and CI gate (Gate 4) pass.
-- [ ] The republication audit (Gate 5) is recorded in the amendment
+- [x] The local build gate (Gate 2) passes.
+- [x] The repository gates (Gate 3) and CI gate (Gate 4) pass.
+- [x] The republication audit (Gate 5) is recorded in the amendment
   log.
